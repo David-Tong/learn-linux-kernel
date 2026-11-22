@@ -25,6 +25,7 @@ qemu-system-x86_64 -kernel arch/x86/boot/bzImage -nographic
 | read() 系统调用 | filesystem/read-syscall-kernel-internals.md | 5-6h |
 | 如何编译内核 | kernel-build/building-and-running-kernel.md | 2-3h |
 | 学习路线 | LEARNING_GUIDE.md | 1-2h |
+| **如何阅读源代码** | **READING_SOURCE_CODE.md** | **30min** |
 
 ## 🔑 核心概念（30 秒版本）
 

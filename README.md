@@ -212,6 +212,20 @@ grep -n "startup_64" arch/x86/boot/compressed/head_64.S
 - **QEMU 文档**：https://www.qemu.org/documentation/
 - **内核调试指南**：`Documentation/dev-tools/kgdb.rst`
 
+## 阅读源代码快速入门
+
+想要直接阅读 Linux Kernel 7.0.0 源代码？参考 [**READING_SOURCE_CODE.md**](READING_SOURCE_CODE.md)：
+
+- 🚀 **快速开始**：5 分钟内定位任意函数
+- 🔍 **查找技巧**：grep、find、cscope、tags 等工具
+- 📝 **阅读方法**：系统化的三种阅读策略
+- 🛠️ **工具配置**：VS Code、Vim 等编辑器配置
+- 📚 **实例教学**：以 read() 系统调用为例追踪代码
+- 💡 **常见问题**：宏定义、条件编译等理解技巧
+- 🎯 **学习计划**：4 周内掌握源代码阅读
+
+**推荐顺序**：先阅读本文档的相关章节，然后参考 READING_SOURCE_CODE.md 在源代码中找到具体实现。
+
 ## 许可证
 
 详见 LICENSE 文件。
