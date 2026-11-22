@@ -7,6 +7,7 @@
 ### [read-syscall-kernel-internals.md](read-syscall-kernel-internals.md) - read() 系统调用内核实现
 
 **学习内容**：
+- 🔹 **Python read() 和内核 read() 系统调用的关系**（新增！）
 - 🔹 POSIX read() 接口定义和用法
 - 🔹 系统调用的用户态到内核态转换
 - 🔹 系统调用入口点和 syscall 表
