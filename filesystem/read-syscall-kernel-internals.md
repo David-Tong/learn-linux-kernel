@@ -112,7 +112,108 @@ char buf[1024];
 ssize_t n = read(3, buf, 1024);  // 调用 read
 ```
 
-编译后，这变成了汇编代码（由 glibc 生成）：
+现在重点来了：**这个 `read()` 函数来自哪里？**
+
+在 Linux 上，当你写 `#include <unistd.h>` 时，`read()` 函数不是你写的，而是**glibc 库提供的**。
+
+glibc（GNU C Library）是系统 C 库，里面包含了所有标准 POSIX 函数的实现。
+
+**编译、链接、运行的三个阶段：**
+
+| 阶段 | 发生什么 | 代码位置 |
+|------|--------|--------|
+| **编译（Compile）** | 编译器将你的 C 代码转成汇编和机器码 | 你的 test.c |
+| **链接（Link）** | 链接器将你的代码和 glibc 库文件链接在一起，生成可执行文件 | glibc 库中已存在的代码 |
+| **运行（Runtime）** | 操作系统执行可执行文件，CPU 逐行执行指令 | 内存中的代码 |
+
+**关键点：glibc 中的 `read()` 是提前用汇编写好的，不是实时生成的！**
+
+源代码位置：`glibc/sysdeps/unix/sysv/linux/x86_64/syscall.S`
+
+```asm
+; 这段汇编代码在 glibc 库中是提前写好的
+; 编译 glibc 时就被编译成机器码
+; 链接时被链入到你的程序中
+; 运行时 CPU 执行这段代码
+
+SYSCALL_WRAPPER(read, 3)   ; 生成 read() 的系统调用包装器
+
+; 展开后的样子：
+read:
+    mov %rcx, %r10          ; 参数 4 的处理
+    mov $0, %rax            ; RAX = 0（read 的系统调用号）
+    syscall
+    cmp $-4095, %rax        ; 检查错误
+    jae SYSCALL_ERROR_LABEL
+    ret
+```
+
+**所以执行过程是这样的：**
+
+```
+你的程序运行
+  ↓
+执行 read(3, buf, 1024)
+  ↓
+CPU 跳转到 glibc 库中预先写好的 read() 函数
+  ↓
+这个函数执行汇编代码：
+  - 设置寄存器
+  - 执行 syscall 指令
+  ↓
+进入内核
+```
+
+**总结：**
+- ✅ glibc 中的 `read()` 是**预先用汇编编写**的（开源可看）
+- ✅ 编译时会**将其链接到你的程序**中
+- ✅ 运行时 CPU**直接执行**这段汇编代码（不是生成的）
+- ✅ 这段代码每次调用时都是**相同的**（除非参数不同）
+
+**如何验证这一点？**
+
+方法 1：查看 glibc 源代码
+
+```bash
+# 获取 glibc 源码
+git clone https://sourceware.org/git/glibc.git
+cd glibc
+
+# 查看 read() 的实现
+cat sysdeps/unix/sysv/linux/x86_64/syscall.S
+
+# 或查看生成的代码
+grep -n "read" sysdeps/unix/sysv/linux/x86_64/sysdep.h
+```
+
+方法 2：用反汇编工具查看你的程序
+
+```bash
+# 编译你的程序
+gcc -o myprogram test.c
+
+# 反汇编，查看 read() 函数
+objdump -d myprogram | grep -A 10 "<read@plt>"
+```
+
+输出会显示 PLT（Procedure Linkage Table）中的跳转代码，最终指向 glibc 中的真实代码。
+
+方法 3：运行时用 gdb 调试
+
+```bash
+gdb ./myprogram
+(gdb) break read
+(gdb) run
+(gdb) disassemble  ; 反汇编当前函数，显示 glibc 中的 read() 代码
+```
+
+---
+
+现在你理解了：这段汇编代码是 **glibc 在很久以前就写好、编译好、存在于库文件中的**。
+
+下面继续看 CPU 执行这段代码时会发生什么。
+
+编译后，你的程序包含了对这个函数的调用。当程序运行时，这段代码被执行：
 
 ```asm
 ; 第 1 步：准备参数，放入固定的寄存器
