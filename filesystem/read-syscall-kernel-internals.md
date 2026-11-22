@@ -312,31 +312,48 @@ CPU 硬件自动：恢复权限 + 恢复返回地址 + 恢复栈
 | 4 | `<entry point>` | 表驱动生成的入口点前缀名 | sys_read |
 | 5+ | `[<compat>]` | 可选：兼容模式入口点 | （无） |
 
-#### ⚙️ 编译时动态生成的关键秘密
+#### ⚙️ 宏的真实展开过程
 
-这是理解整个系统的关键：
+这是理解整个系统的关键。Linux 内核使用宏来自动生成系统调用 stub。
 
-**系统调用表文件中的定义：**
-```
-0  common  read  sys_read
-```
+**源文件中的 SYSCALL_DEFINE3 宏定义：**
 
-**编译时会自动生成：**
+位置：`include/linux/syscalls.h`
+
 ```c
-// Linux build系统根据 sys_read 前缀自动生成
-// 生成一个名为 __x64_sys_read() 的 stub 函数
-asmlinkage long __x64_sys_read(unsigned int fd, 
-                               char __user *buf, 
-                               size_t count);
+#define SYSCALL_DEFINE3(name, ...) \
+    SYSCALL_DEFINEx(3, _##name, __VA_ARGS__)
 ```
 
-**关键注释说明：**
+这个宏对 `read` 系统调用的调用：
+
+```c
+// 位置：fs/read_write.c
+SYSCALL_DEFINE3(read, unsigned int, fd, 
+                      char __user *, buf, 
+                      size_t, count) {
+    return ksys_read(fd, buf, count);
+}
+```
+
+会展开成：
+
+```c
+SYSCALL_DEFINEx(3, _read, unsigned int, fd,
+                        char __user *, buf,
+                        size_t, count) {
+    return ksys_read(fd, buf, count);
+}
+```
+
+**关键注释说明（来自 syscall_64.tbl）：**
 > `The __x64_sys_*() stubs are created on-the-fly for sys_*() system calls`
 
 这意味着：
-- 表中填 `sys_read`
-- 编译时自动生成 `__x64_sys_read()` stub
-- 这个 stub 会调用 `ksys_read()` 的实现
+1. 在 `syscall_64.tbl` 中指定 `sys_read` 作为入口点
+2. 编译系统根据这个前缀生成 `__x64_sys_read()` 函数
+3. `SYSCALL_DEFINE3` 宏为这个生成的 `__x64_sys_read()` 提供参数类型和实现
+4. 这个 stub 函数体就是 `{ return ksys_read(...); }`
 
 #### 🔄 完整的查询和执行流程
 
@@ -419,19 +436,47 @@ SYSCALL_DEFINE3(read, unsigned int, fd,
 2. 进行基础的参数检查和转换
 3. 转发给 `ksys_read()`，让它执行真正的工作
 
+### 三方互动：系统调用表、宏、和实现
+
+这三个部分协同工作：
+
+| 组件 | 位置 | 职责 |
+|------|------|------|
+| **系统调用表** | `syscall_64.tbl` | 定义系统调用号和入口点名 `sys_read` |
+| **SYSCALL_DEFINE3 宏** | `include/linux/syscalls.h` + `fs/read_write.c` | 为自动生成的 stub 提供参数类型和函数体 |
+| **自动生成的 stub** | 编译时生成的 `__x64_sys_read()` | 被系统调用表指向，只转发参数给 ksys_read() |
+| **真实实现** | `fs/read_write.c` 中的 `ksys_read()` | 完成所有内核工作 |
+
+**具体流程：**
+
+1. **编译时**：
+   - 编译系统读取 `syscall_64.tbl`，看到 `0  common  read  sys_read`
+   - 编译系统根据 `sys_read` 前缀生成 `__x64_sys_read()` 函数声明
+   - `SYSCALL_DEFINE3` 宏为这个生成的 `__x64_sys_read()` 提供参数类型和实现
+   - 最终 `__x64_sys_read()` 的函数体是 `{ return ksys_read(fd, buf, count); }`
+
+2. **运行时**：
+   - 用户调用 `read()`，执行 `syscall` 指令进入内核
+   - 内核根据 RAX = 0 查系统调用表
+   - 找到 `__x64_sys_read()` 并跳转
+   - `__x64_sys_read()` 转发参数给 `ksys_read()`
+   - `ksys_read()` 执行真正的文件读取
+
 ### 为什么这样设计？
 
 | 层级 | 名称 | 职责 | 优点 |
 |------|------|------|------|
 | **表驱动** | 系统调用表 | 定义系统调用号和入口点 | 一个表支持多个架构，自动生成 stub |
+| **参数适配** | SYSCALL_DEFINE3 宏 | 参数类型转换和语义检查 | 确保参数正确转换，编译时检查 |
 | **自动生成** | `__x64_sys_read()` stub | 被系统调用表调用，参数转发 | 架构相关的统一入口点，自动适配不同架构 |
 | **真实实现** | `ksys_read()` | 真正的内核实现 | 代码复用，内核代码可直接调用，无需经过系统调用 |
 
 **好处：**
 - **表驱动设计**：一份表支持多个架构，编译时为每个架构生成对应的 stub
-- **架构隔离**：x86-64、ARM、RISC-V 等不同架构编译器会生成不同的 stub
+- **架构隔离**：x86-64、ARM、RISC-V 等不同架构编译器会生成不同的 stub（`__x64_sys_read()`、`__arm64_sys_read()` 等）
+- **参数检查**：宏在编译时确保参数类型正确
 - **代码复用**：内核内部代码可以直接调用 `ksys_read()` 而不用经过系统调用机制
-- **清晰责任**：表定义选路，自动生成的 stub 转发，实现层做实事
+- **清晰责任**：表定义选路，宏提供参数适配，自动生成的 stub 转发，实现层做实事
 
 ### 调用下一个函数
 
