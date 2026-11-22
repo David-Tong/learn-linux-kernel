@@ -7,7 +7,6 @@
 ### [read-syscall-kernel-internals.md](read-syscall-kernel-internals.md) - read() 系统调用内核实现
 
 **学习内容**：
-- 🔹 **Python read() 和内核 read() 系统调用的关系**（新增！）
 - 🔹 POSIX read() 接口定义和用法
 - 🔹 系统调用的用户态到内核态转换
 - 🔹 系统调用入口点和 syscall 表
@@ -35,6 +34,27 @@
 - 熟悉 Linux 文件系统基础
 - 理解中断和异常处理
 - 完成 kernel-boot 目录的学习
+
+---
+
+### [python-read-reference.md](python-read-reference.md) - Python read() 和内核 read() 系统调用的关系（参考）
+
+**参考内容**：
+- 🔹 Python 调用链（从 Python 对象到内核 syscall）
+- 🔹 CPython 源码位置和三层实现细节
+- 🔹 Modules/_io/fileobject.c - FileIO 对象实现
+- 🔹 Modules/posixmodule.c - os 模块 C 层实现
+- 🔹 glibc io/read.c - C 库 read() 包装
+- 🔹 实际案例：性能优化与阻塞 I/O 理解
+- 🔹 asyncio 非阻塞 I/O 的工作原理
+- 🔹 Python 缓冲区管理机制
+
+**适用人群**：
+- 想理解 Python 底层实现的开发者
+- 需要优化 Python I/O 性能的工程师
+- 对跨语言调用栈感兴趣的人
+
+**预计时间**：1-2 小时
 
 ---
 

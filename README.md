@@ -37,11 +37,6 @@
 理解文件系统工作原理和系统调用机制。
 
 - **read-syscall-kernel-internals.md** - read() 系统调用内核实现
-  - **新增**：Python read() 和内核 read() 系统调用的完整关系（第 0 章）
-    - Python 文件对象到内核的完整调用链
-    - CPython 源码位置和三层实现细节
-    - asyncio 和异步 I/O 的工作原理
-    - 性能优化的实践建议
   - read() POSIX 接口（`include/uapi/unistd.h`）
   - 系统调用入口点（`arch/x86/entry/entry_64.S`）
   - sys_read() 处理器（`fs/read_write.c`）
@@ -51,6 +46,12 @@
   - 块 I/O 层（`block/blk-core.c`）
   - 设备驱动和中断处理（`drivers/ata/`、`drivers/scsi/`）
   - I/O 完成流程（`mm/filemap.c`）
+
+- **python-read-reference.md** - Python read() 和内核 read() 系统调用的关系（参考文档）
+  - Python 文件对象到内核的完整调用链
+  - CPython 源码位置和三层实现细节
+  - asyncio 和异步 I/O 的工作原理
+  - 性能优化的实践建议
 
 ### 3. kernel-build - 编译和运行内核
 实践指南，学习如何编译和测试自定义内核。
