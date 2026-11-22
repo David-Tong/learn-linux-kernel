@@ -155,6 +155,44 @@ CPU 自动：恢复权限 → 恢复返回地址 → 恢复栈 → 跳回用户�
 
 > 想要了解 CPU 寄存器的具体映射、汇编代码细节、硬件操作等技术细节，请参考 [系统调用详细参考](references/syscall-detailed-reference.md)。
 
+### 从 POSIX read() 到内核的 sys_read()
+
+现在我们知道用户调用 `read()` 后会通过 syscall 进入内核。但进入内核后，到底调用的是哪个内核函数？
+
+**转换的三个层次：**
+
+1. **POSIX 层**：用户程序调用 `read(3, buf, 1024)`
+   - 这是 glibc 中的包装函数
+   - 参数：fd=3，buf，count=1024
+
+2. **系统调用层**：CPU 切换到内核后，内核根据系统调用号查表
+   - 系统调用号被放在 RAX 寄存器中：RAX = 0
+   - 内核查表：0 对应 `__x64_sys_read()`
+   - 这个函数位置：`arch/x86/include/asm/syscalls.h`
+
+3. **内核实现层**：真正的读取逻辑
+   - `__x64_sys_read()` 解析参数后调用 `ksys_read()`
+   - `ksys_read()` 才是真正执行读文件的函数
+   - 位置：`fs/read_write.c`
+
+**源代码位置（Linux Kernel 7.0.0）：**
+
+系统调用号表：`arch/x86/entry/syscalls/syscall_64.tbl`
+```
+0   read   sys_read   __x64_sys_read
+```
+
+实现函数：`fs/read_write.c`
+```c
+SYSCALL_DEFINE3(read, unsigned int, fd, 
+                      char __user *, buf, 
+                      size_t, count) {
+    return ksys_read(fd, buf, count);
+}
+```
+
+下一章会详细讲解 `ksys_read()` 和它调用的函数链。
+
 ## 3. 文件描述符和文件结构
 
 ### 数据结构
