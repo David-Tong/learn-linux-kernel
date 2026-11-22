@@ -22,7 +22,7 @@ address_space_read_operations() (具体文件系统)
 (页缓存、块设备等)
 ```
 
-> **相关参考**：想了解 Python read() 和内核 read() 的关系？请参考 [python-read-reference.md](python-read-reference.md)
+> **相关参考**：想了解 Python read() 和内核 read() 的关系？请参考 [python-read-reference.md](references/python-read-reference.md)
 
 ---
 
