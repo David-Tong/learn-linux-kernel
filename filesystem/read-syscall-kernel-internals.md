@@ -59,95 +59,386 @@ int main() {
 
 ## 2. 用户空间到内核空间的转换
 
-### 系统调用机制（x86-64）
+这一章介绍 `read()` 调用是如何从用户程序穿过权限边界进入内核的。这是系统调用的核心机制。
 
-在用户空间调用 `read()` 时，通常是 C 库（glibc）中的一个包装器：
+### 第 1 层：你写的用户代码
+
+用户程序中的调用看起来很简单：
 
 ```c
-// 来自 glibc - 简化版
+#include <unistd.h>
+
+char buf[1024];
+ssize_t n = read(fd, buf, 1024);
+```
+
+你以为在调用一个普通的 C 函数。但实际上不是。
+
+**为什么不能是普通函数？**
+
+因为 `read()` 最终需要：
+- 访问磁盘硬件
+- 访问设备驱动程序
+- 操作内核数据结构（文件表、缓存等）
+
+用户程序没有权限直接做这些。所以必须进入内核。
+
+### 第 2 层：glibc 包装器
+
+用户程序链接的 `read()` 实际上是 glibc 中的包装函数：
+
+```c
+// 来自 glibc 源码 - sysdeps/unix/sysv/linux/read.c
 ssize_t read(int fd, void *buf, size_t count) {
-    // 准备参数并触发系统调用
-    return INLINE_SYSCALL(read, 3, fd, buf, count);
+    // 调用系统调用包装宏
+    return SYSCALL_CANCEL(read, fd, buf, count);
 }
 ```
 
-这个宏触发实际的系统调用入口：
+这个宏做的事情是：
+1. 准备参数
+2. 执行 `syscall` 指令
 
-```asm
-; x86-64 系统调用入口
-; 参数：RDI=fd, RSI=buf, RDX=count
-; RAX 包含系统调用号（x86-64 上 read 是 0）
-
-mov $0, %rax           ; read 的系统调用号
-syscall                ; 触发系统调用（转换到内核模式）
-```
-
-### 系统调用表
-
-`syscall` 指令触发内核执行以下操作：
-1. 从用户模式切换到内核模式（通过 CPU 特权模式）
-2. 保存当前用户上下文（寄存器、堆栈指针）
-3. 跳转到内核的系统调用处理器
-
-在 Linux Kernel 7.0.0 中，read 系统调用在 `fs/read_write.c` 中定义：
+本质相当于：
 
 ```c
-// 来自 arch/x86/entry/syscalls/syscall_64.tbl
-0   read    sys_read    __x64_sys_read
+syscall(SYS_read, fd, buf, count);
 ```
 
-## 3. 系统调用入口点
+### 第 3 层：参数如何传给内核
 
-### 位置：`fs/read_write.c` 和 `arch/x86/entry/`
+x86-64 Linux 有一个固定的规则：**系统调用参数放在特定寄存器中**。
 
-执行 `syscall` 指令时，内核的低级处理器接收控制。这个处理器定义在 `arch/x86/entry/entry_64.S`：
+对于 `read(fd, buf, count)` 这个系统调用：
+
+| 参数 | 值 | 目标寄存器 |
+|------|-----|----------|
+| 系统调用号 | 0（表示 read） | `RAX` |
+| 第 1 个参数 | `fd` | `RDI` |
+| 第 2 个参数 | `buf` | `RSI` |
+| 第 3 个参数 | `count` | `RDX` |
+
+所以在执行 `syscall` 指令前，glibc 包装器会生成类似这样的汇编代码：
 
 ```asm
-; arch/x86/entry/entry_64.S - 系统调用入口
+; 假设调用 read(3, buf, 1024)
+mov $0, %rax        ; RAX = 0（read 的系统调用号）
+mov $3, %rdi        ; RDI = 3（文件描述符）
+mov buf_addr, %rsi  ; RSI = buf 的地址
+mov $1024, %rdx     ; RDX = 1024（字节数）
+syscall             ; 执行系统调用指令
+```
+
+### 第 4 层：系统调用号
+
+前面的 `RAX = 0` 是什么意思？
+
+Linux 维护了一张表，每个系统调用都有一个唯一的号码：
+
+```
+系统调用号  名字      x86-64 内核函数
+0           read      __x64_sys_read
+1           write     __x64_sys_write
+2           open      __x64_sys_open
+3           close     __x64_sys_close
+...
+```
+
+这张表的位置是：`arch/x86/entry/syscalls/syscall_64.tbl`
+
+在 Linux 7.0.0 中，对于 x86-64 架构：
+
+```
+# 来自 arch/x86/entry/syscalls/syscall_64.tbl
+0    read    sys_read    __x64_sys_read
+```
+
+所以：
+- `read()` 的系统调用号就是 `0`
+- 内核会通过 `RAX` 中的值 `0` 查表，找到应该调用的函数 `__x64_sys_read`
+
+### 第 5 层：CPU 权限级别
+
+x86-64 CPU 有权限级别的概念：
+
+```
+Ring 0  - 内核（最高权限）
+Ring 1  - （保留，通常不用）
+Ring 2  - （保留，通常不用）
+Ring 3  - 用户程序（最低权限）
+```
+
+用户程序一直在 **Ring 3** 运行。大部分指令都可以执行，但某些**特权指令**只能在 Ring 0 执行。
+
+例如：
+- `CLI`（禁用中断）- 只能在 Ring 0
+- `MOV CR3, RAX`（修改页表） - 只能在 Ring 0
+- 访问磁盘 I/O 端口 - 只能在 Ring 0
+
+如果用户程序尝试执行这些指令，CPU 会抛出异常。
+
+**那怎么办？使用系统调用！**
+
+### 第 6 层：syscall 指令
+
+最关键的指令是 `syscall`：
+
+```asm
+syscall
+```
+
+这个指令的作用：
+1. CPU 检测到 `syscall` 指令
+2. CPU 自动从 Ring 3 切换到 Ring 0
+3. CPU 执行以下操作，然后跳入内核
+
+这是 CPU 硬件提供的**权限转换机制**。用户程序无法直接进入 Ring 0，只有通过 `syscall` 指令才能请求 CPU 完成这个转换。
+
+### 第 7 层：CPU 执行 syscall 时做的三件事
+
+#### 1. 保存用户环境（User Context）
+
+CPU 执行 `syscall` 后，需要记住用户程序当前的状态，这样才能在系统调用返回后继续执行用户代码。
+
+CPU 自动保存：
+- `RIP` - 下一条用户指令的地址
+- `RSP` - 用户栈指针
+- `RFLAGS` - CPU 标志寄存器（包含进位标志、零标志等）
+
+这些值被保存到 **Ring 0 安全的位置**（通常是内核栈或特殊寄存器）。
+
+#### 2. 切换堆栈（Stack Switching）
+
+用户程序有自己的栈：
+
+```
+User Mode Stack
+┌─────────────────┐
+│   局部变量      │
+│   返回地址      │
+│   参数          │
+└─────────────────┘
+```
+
+内核也有自己的栈（每个 CPU 核心一个，或每个进程一个）：
+
+```
+Kernel Mode Stack
+┌─────────────────┐
+│   内核数据      │
+│   中断帧        │
+│   函数变量      │
+└─────────────────┘
+```
+
+执行 `syscall` 后，CPU 自动将 `RSP`（栈指针）从用户栈切换到内核栈。这防止用户代码破坏内核栈。
+
+#### 3. 跳入内核入口函数
+
+CPU 查看一个特殊的 MSR（Model-Specific Register）寄存器：
+
+```
+MSR_LSTAR (IA32_LSTAR)
+```
+
+这个寄存器中预先存储了系统调用入口函数的地址。对于 Linux：
+
+```
+MSR_LSTAR = entry_SYSCALL_64
+```
+
+CPU 自动跳转到这个地址，进入内核的低级汇编处理程序。
+
+类似：
+```asm
+; CPU 硬件做的：
+Ring3 → Ring0
+RSP = KernelStack
+RIP = entry_SYSCALL_64
+```
+
+### 第 8 层：内核的低级处理（汇编）
+
+位置：`arch/x86/entry/entry_64.S`
+
+当 CPU 跳入 `entry_SYSCALL_64` 时，这是一个汇编函数，负责：
+
+```asm
+; arch/x86/entry/entry_64.S - 简化版本
+
 ENTRY(entry_SYSCALL_64)
-    # 保存用户寄存器
-    swapgs              ; 交换 GS 寄存器为内核
-    mov %rsp, %gs:0x5700 ; 保存用户 RSP
+    # 保存更多寄存器（CPU 只自动保存了 RIP、RSP、RFLAGS）
+    # 现在需要保存其他寄存器以供高级 C 代码使用
     
-    # 设置内核堆栈
-    mov $entry_SYSCALL_64_safe_stack, %rsp
+    swapgs                      ; 交换 GS 寄存器为内核 GS
     
-    # 保存用户上下文
+    # 获取当前进程的内核栈
+    mov %rsp, %gs:0x5700        ; 保存用户 RSP 到特殊位置
+    mov %gs:0x5708, %rsp        ; 加载内核 RSP
+    
+    # 创建一个 pt_regs 结构（寄存器现场）
     push %r15
     push %r14
     push %r13
     push %r12
-    # ... 保存其他寄存器
+    push %rbx
+    push %rcx
+    # ... 保存所有寄存器
     
-    # 调用高级系统调用处理器
+    # 进入 C 代码
     call do_syscall_64
+    
+    # 恢复寄存器并返回用户态
+    pop %rcx
+    pop %rbx
+    # ... 恢复所有寄存器
+    
+    # 返回用户态的指令
+    sysret                      ; 或其他返回指令
 ENDPROC(entry_SYSCALL_64)
 ```
 
-`do_syscall_64()` 函数：
+关键点：
+- **pt_regs 结构**：一个数据结构，包含所有保存的寄存器值
+- 这个结构被传递给 C 代码 `do_syscall_64()`
+
+### 第 9 层：内核的高级处理（C 代码）
+
+位置：`arch/x86/entry/common.c`
 
 ```c
-// 来自 arch/x86/entry/common.c - 简化版
+// 简化版本
 __visible noinstr void do_syscall_64(struct pt_regs *regs) {
-    // 检查系统调用号
-    int nr = syscall_get_nr(current, regs);
+    // regs 包含用户程序的所有寄存器值
     
-    if (nr < NR_syscalls) {
-        // 调用实际的系统调用处理器
-        regs->ax = sys_call_table[nr](regs);
+    // 获取系统调用号
+    int syscall_nr = regs->rax;  // RAX 中的值
+    
+    // 检查系统调用号是否有效
+    if (syscall_nr >= NR_syscalls) {
+        regs->rax = -ENOSYS;  // 系统调用不存在
+        return;
     }
+    
+    // 通过系统调用号查表，调用对应的系统调用处理函数
+    // sys_call_table[0] = __x64_sys_read
+    // sys_call_table[1] = __x64_sys_write
+    // ...
+    
+    long result = sys_call_table[syscall_nr](regs);
+    
+    // 将返回值放入 RAX 寄存器
+    regs->rax = result;
 }
 ```
 
-## 4. sys_read() 系统调用处理器
+关键点：
+- **sys_call_table** 是一个数组，索引就是系统调用号
+- `sys_call_table[0]` 指向 `__x64_sys_read` 函数
+- 系统调用号从 `regs->rax` 读取
 
-### 位置：`fs/read_write.c`
+### 第 10 层：调用实际的系统调用处理函数
 
-这是 Kernel 7.0.0 中 read 系统调用的主要入口点：
+根据系统调用号，内核调用对应的处理函数。对于 `read()`，就是 `__x64_sys_read()`。
+
+这个函数位置在：`fs/read_write.c`
 
 ```c
-// 来自 fs/read_write.c
-SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count) {
+// 来自 arch/x86/entry/syscalls/syscall_64.tbl
+// 0    read    sys_read    __x64_sys_read
+
+SYSCALL_DEFINE3(read, unsigned int, fd, 
+                      char __user *, buf, 
+                      size_t, count) {
+    return ksys_read(fd, buf, count);
+}
+```
+
+这里：
+- `fd` 来自 `RDI`
+- `buf` 来自 `RSI`
+- `count` 来自 `RDX`
+
+寄存器值被自动转换为函数参数。
+
+### 第 11 层：返回用户态
+
+读取完成后，系统调用处理函数返回一个值（读取的字节数）：
+
+```c
+return bytes_read;  // 假设是 1024
+```
+
+这个返回值被放入 `RAX` 寄存器：
+
+```
+RAX = 1024
+```
+
+然后，内核的返回路径（在 `entry_SYSCALL_64`）执行：
+
+```asm
+sysret  ; 或 syscall 返回指令
+```
+
+这个指令：
+1. CPU 自动从 Ring 0 切换回 Ring 3
+2. 恢复之前保存的 `RIP`（继续执行用户代码）
+3. 恢复之前保存的 `RSP`（恢复用户栈）
+4. 恢复 `RFLAGS`（恢复 CPU 标志）
+
+用户程序继续执行，就像没有离开过一样。唯一的区别是 `RAX` 中现在有了返回值：
+
+```c
+// 用户程序
+ssize_t n = read(fd, buf, 1024);  // n = 1024（来自 RAX）
+```
+
+### 完整流程总结
+
+```
+用户程序
+  ↓
+read(3, buf, 1024)
+  ↓
+glibc 包装器
+  RAX = 0 (read 号)
+  RDI = 3
+  RSI = buf
+  RDX = 1024
+  syscall 指令
+  ↓
+CPU 权限转换 (Ring 3 → Ring 0)
+CPU 保存用户环境 (RIP, RSP, RFLAGS)
+CPU 切换到内核栈
+CPU 跳入 entry_SYSCALL_64
+  ↓
+entry_SYSCALL_64 (汇编)
+  创建 pt_regs 结构
+  保存所有寄存器
+  调用 do_syscall_64()
+  ↓
+do_syscall_64() (C 代码)
+  从 RAX 读取系统调用号 (0)
+  查表：sys_call_table[0] = __x64_sys_read
+  调用 __x64_sys_read(regs)
+  ↓
+__x64_sys_read() (内核处理函数)
+  从参数读取 fd、buf、count
+  执行实际的文件读取逻辑
+  ↓
+返回用户态
+  返回值放入 RAX (1024 字节)
+  sysret 指令
+  CPU 权限转换 (Ring 0 → Ring 3)
+  恢复用户寄存器和栈
+  ↓
+用户程序
+  继续执行下一行
+  n = 1024 (从 RAX 读取)
+```
+
+现在你了解了系统调用的基本机制。接下来的章节会深入内核的文件读取逻辑。
     return ksys_read(fd, buf, count);
 }
 ```
@@ -180,7 +471,7 @@ ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count) {
 3. `file_pos_write()`：更新当前文件位置
 4. `fdput_pos()`：释放文件描述符并解锁
 
-## 5. 文件描述符和文件结构
+## 3. 文件描述符和文件结构
 
 ### 数据结构
 
@@ -251,7 +542,7 @@ struct inode {
 };
 ```
 
-## 6. VFS 读取操作
+## 4. VFS 读取操作
 
 ### vfs_read() 实现
 
@@ -295,7 +586,7 @@ struct file_operations {
 
 不同文件系统类型（ext4、btrfs 等）实现自己的 file_operations 结构。
 
-## 7. 常规文件读取路径
+## 5. 常规文件读取路径
 
 ### 对于 ext4 文件系统上的常规文件
 
@@ -371,7 +662,7 @@ static ssize_t generic_file_buffered_read(struct kiocb *iocb,
 }
 ```
 
-## 8. 页缓存
+## 6. 页缓存
 
 ### 什么是页缓存？
 
@@ -420,7 +711,7 @@ struct page *find_get_page(struct address_space *mapping, pgoff_t offset) {
 }
 ```
 
-## 9. 从磁盘读取
+## 7. 从磁盘读取
 
 ### 当页面不在缓存中
 
@@ -471,7 +762,7 @@ static int ext4_read_folio(struct file *file, struct folio *folio) {
 }
 ```
 
-## 10. 块 I/O 层
+## 8. 块 I/O 层
 
 ### Bio 结构
 
