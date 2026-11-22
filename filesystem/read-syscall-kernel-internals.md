@@ -16,7 +16,7 @@
 └─ 系统调用表查询（syscall_64.tbl）
      ↓ RAX = 0 → sys_read
      ↓
-└─ __x64_sys_read() (由 SYSCALL_DEFINE3 生成的包装器)
+└─ __x64_sys_read() (编译时自动生成的 stub)
      ↓ [直接转发参数]
      ↓
 └─ ksys_read() (真正的内核实现)
@@ -29,8 +29,8 @@
 ```
 
 **核心理解：**
-- `sys_read` 和 `__x64_sys_read()` 是同一个函数（由宏生成），系统调用表指向它
-- `__x64_sys_read()` 是**包装器**，只负责参数转发
+- 系统调用表定义 `sys_read`，编译时自动生成 `__x64_sys_read()` stub
+- `__x64_sys_read()` 是系统调用入口点，只负责参数转发
 - `ksys_read()` 是**真实实现**，完成所有读取工作
 
 > **相关参考**：想了解 Python read() 和内核 read() 的关系？请参考 [python-read-reference.md](references/python-read-reference.md)
@@ -105,7 +105,7 @@ read:
 1. **CPU 硬件**自动进行权限切换（Ring 3 → Ring 0）
 2. **硬件**跳转到内核入口：`entry_SYSCALL_64()`
 3. **内核**通过系统调用号（RAX = 0）查表，在 `syscall_64.tbl` 中找到 `sys_read`
-4. **调用**：跳转到 `sys_read`（由 SYSCALL_DEFINE3 宏生成的 `__x64_sys_read()`）
+4. **调用**：跳转到编译时自动生成的 `__x64_sys_read()` stub 函数
 
 ### 使用示例
 
@@ -269,82 +269,90 @@ CPU 硬件自动：恢复权限 + 恢复返回地址 + 恢复栈
 ```
 系统调用表 (arch/x86/entry/syscalls/syscall_64.tbl)
      ↓
-  0  common  read  sys_read  __x64_sys_read
+  0  common  read  sys_read
      ↓
-  sys_read (由 SYSCALL_DEFINE3 宏生成的函数)
+  __x64_sys_read() (编译时由 sys_read 动态生成的 stub)
      ↓
   ksys_read (真正的内核实现，位于 fs/read_write.c)
 ```
 
-#### 📋 系统调用号表
+#### 📋 系统调用号表的真实格式
 
 位置：`arch/x86/entry/syscalls/syscall_64.tbl`
 
+**表头注释（包含完整定义）：**
+
 ```
-# 格式说明
-# 号码  类型    名字    位置    函数名
-0      common  read    sys_read  __x64_sys_read
-1      common  write   sys_write __x64_sys_write
-2      common  open    sys_open  __x64_sys_open
-3      common  close   sys_close __x64_sys_close
-...
+# SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
+#
+# 64-bit system call numbers and entry vectors
+#
+# The format is:
+# <number> <abi> <name> <entry point> [<compat entry point> [noreturn]]
+#
+# The __x64_sys_*() stubs are created on-the-fly for sys_*() system calls
+#
+# The abi is "common", "64" or "x32" for this file.
+#
+```
+
+**实际的 read 系统调用条目：**
+
+```
+0	common	read			sys_read
 ```
 
 **表中各列的含义：**
 
-| 列 | 含义 | 例子 |
-|---|------|------|
-| **号码** | 系统调用号（放在 RAX） | 0（read） |
-| **类型** | 应用场景（common = 通用） | common |
-| **名字** | 系统调用的文字名称 | read |
-| **位置** | 通用名称前缀 | sys_read |
-| **函数名** | 实际的 C 函数名 | __x64_sys_read |
+| 列 | 名称 | 含义 | 例子 |
+|---|------|------|------|
+| 1 | `<number>` | 系统调用号（放在 RAX 寄存器） | 0（read） |
+| 2 | `<abi>` | 应用场景（common = 通用，64 = x86-64专用，x32 = 32位模式） | common |
+| 3 | `<name>` | 系统调用的文字名称 | read |
+| 4 | `<entry point>` | 表驱动生成的入口点前缀名 | sys_read |
+| 5+ | `[<compat>]` | 可选：兼容模式入口点 | （无） |
 
-#### ⚙️ 宏生成函数的秘密
+#### ⚙️ 编译时动态生成的关键秘密
 
-在 `fs/read_write.c` 中，你看到：
+这是理解整个系统的关键：
 
-```c
-SYSCALL_DEFINE3(read, unsigned int, fd, 
-                      char __user *, buf, 
-                      size_t, count) {
-    return ksys_read(fd, buf, count);
-}
+**系统调用表文件中的定义：**
+```
+0  common  read  sys_read
 ```
 
-这个 `SYSCALL_DEFINE3` **宏**会被编译器展开。在 x86-64 平台上，这个宏生成一个名为 `__x64_sys_read()` 的函数。系统调用表正是指向这个生成的函数。
-
-**宏展开后的伪代码（概念上）：**
-
+**编译时会自动生成：**
 ```c
-// SYSCALL_DEFINE3 宏展开
-// 创建一个函数 __x64_sys_read()
-// 该函数直接调用 ksys_read()
-
+// Linux build系统根据 sys_read 前缀自动生成
+// 生成一个名为 __x64_sys_read() 的 stub 函数
 asmlinkage long __x64_sys_read(unsigned int fd, 
                                char __user *buf, 
-                               size_t count) {
-    return ksys_read(fd, buf, count);
-}
-
-// 同时在某些平台上，sys_read 是 __x64_sys_read 的别名
-// 所以系统调用表中的 "sys_read" 实际上就是这个生成的函数
+                               size_t count);
 ```
 
-#### 🔄 完整的查询流程
+**关键注释说明：**
+> `The __x64_sys_*() stubs are created on-the-fly for sys_*() system calls`
+
+这意味着：
+- 表中填 `sys_read`
+- 编译时自动生成 `__x64_sys_read()` stub
+- 这个 stub 会调用 `ksys_read()` 的实现
+
+#### 🔄 完整的查询和执行流程
 
 ```
-用户程序执行 syscall 指令
+用户程序执行 syscall 指令（RAX = 0）
    ↓
 CPU 切换到内核态
    ↓
-内核入口函数读取 RAX（系统调用号）
+内核入口函数 entry_SYSCALL_64 读取 RAX
    ↓
 查询系统调用表 syscall_64.tbl
-   ↓ 找到：0 → sys_read → __x64_sys_read()
-调用 __x64_sys_read()
+   ↓ 找到：0  common  read  sys_read
    ↓
-这个函数立即调用 ksys_read()
+调用自动生成的 __x64_sys_read() stub
+   ↓
+这个 stub 调用真实实现 ksys_read()
    ↓
 ksys_read() 执行真正的读取逻辑
 ```
@@ -352,39 +360,48 @@ ksys_read() 执行真正的读取逻辑
 ### 函数位置和类型
 
 - **源文件**：
-  - 表定义：`arch/x86/entry/syscalls/syscall_64.tbl`
-  - 宏源代码：`include/linux/syscalls.h`（SYSCALL_DEFINE3 定义）
+  - 表定义：`arch/x86/entry/syscalls/syscall_64.tbl`（手写）
   - 包装器实现：`fs/read_write.c`（SYSCALL_DEFINE3(read, ...) 调用）
-- **生成位置**：`arch/x86/include/asm/syscalls.h`（由build脚本生成）
-- **类型**：由宏生成的 C 函数
+- **生成位置**：
+  - Stub 生成：`arch/x86/include/asm/syscalls.h`（由 Linux build 系统自动生成）
+  - 宏定义：`include/linux/syscalls.h`（SYSCALL_DEFINE3 定义）
+- **类型**：
+  - `sys_read`：表中定义的入口点名称
+  - `__x64_sys_read()`：编译时自动生成的 stub 函数（C 语言）
 
 ### sys_read 和 __x64_sys_read 的关系
 
-这两个名称指向同一个函数：
+这两个名称的关系是**自动生成的**：
 
-| 名称 | 来源 | 用途 |
-|------|------|------|
-| `__x64_sys_read` | SYSCALL_DEFINE3 宏生成 | C语言中的真实函数名 |
-| `sys_read` | 系统调用表引用 | 系统调用号查询结果 |
+| 名称 | 来源 | 生成时机 | 用途 |
+|------|------|---------|------|
+| `sys_read` | 系统调用表手写定义 | 编译前存在 | 编译时用来生成 stub 名称 |
+| `__x64_sys_read` | 自动生成的 stub | 编译时生成 | 实际被系统调用表调用 |
 
-在 x86-64 架构中，系统调用表通过别名或符号表将 `sys_read` 指向 `__x64_sys_read()`。
+**生成规则：**
+系统调用表前缀 `sys_*` → 自动生成 `__x64_sys_*()` stub
+
+这样做的好处是：
+- 一行表定义就能自动生成不同架构的 stub 函数
+- x86-64 生成 `__x64_sys_read()`
+- ARM64 生成 `__arm64_sys_read()`
+- RISC-V 生成 `__riscv_sys_read()`
 
 ### 函数的作用
 
 当内核收到系统调用时（RAX = 0）：
 
 1. **表查询**：根据 RAX = 0 在 `syscall_64.tbl` 中查找
-2. **找到条目**：`0  common  read  sys_read  __x64_sys_read()`
-3. **调用函数**：跳转到 `__x64_sys_read()` 函数
-4. **参数转发**：这个函数接收来自寄存器的参数
+2. **找到条目**：`0  common  read  sys_read`
+3. **调用生成的 stub**：跳转到自动生成的 `__x64_sys_read()` 函数
+4. **参数转发**：这个 stub 接收来自寄存器的参数
 5. **调用实现**：直接转发给 `ksys_read()`
 
-### 函数实现
+### SYSCALL_DEFINE3 在其中的角色
+
+在 `fs/read_write.c` 中：
 
 ```c
-// 位置：fs/read_write.c
-// 由 SYSCALL_DEFINE3 宏生成 __x64_sys_read()
-
 SYSCALL_DEFINE3(read, unsigned int, fd, 
                       char __user *, buf, 
                       size_t, count) {
@@ -392,26 +409,33 @@ SYSCALL_DEFINE3(read, unsigned int, fd,
 }
 ```
 
+这个宏做的是：
+1. **定义参数类型**：告诉编译器参数有哪些以及类型是什么
+2. **创建 ksys_read 的包装**：让自动生成的 stub 能正确调用 `ksys_read()`
+3. **兼容性检查**：确保参数传递的正确性
+
 **展开后的职责：**
 1. 接收来自 CPU 寄存器的参数
-2. 进行基础的参数检查
+2. 进行基础的参数检查和转换
 3. 转发给 `ksys_read()`，让它执行真正的工作
 
 ### 为什么这样设计？
 
-| 层级 | 函数 | 职责 | 优点 |
+| 层级 | 名称 | 职责 | 优点 |
 |------|------|------|------|
-| **包装层** | `__x64_sys_read` / `sys_read` | 被系统调用表指向，参数转发 | 架构相关的统一入口点 |
-| **实现层** | `ksys_read` | 真正的内核实现 | 代码复用，内核代码可直接调用，无需经过系统调用 |
+| **表驱动** | 系统调用表 | 定义系统调用号和入口点 | 一个表支持多个架构，自动生成 stub |
+| **自动生成** | `__x64_sys_read()` stub | 被系统调用表调用，参数转发 | 架构相关的统一入口点，自动适配不同架构 |
+| **真实实现** | `ksys_read()` | 真正的内核实现 | 代码复用，内核代码可直接调用，无需经过系统调用 |
 
 **好处：**
-- **架构隔离**：x86-64、ARM、RISC-V 等不同架构可以各自定义系统调用表
+- **表驱动设计**：一份表支持多个架构，编译时为每个架构生成对应的 stub
+- **架构隔离**：x86-64、ARM、RISC-V 等不同架构编译器会生成不同的 stub
 - **代码复用**：内核内部代码可以直接调用 `ksys_read()` 而不用经过系统调用机制
-- **清晰责任**：包装层只转发，实现层做实事
+- **清晰责任**：表定义选路，自动生成的 stub 转发，实现层做实事
 
 ### 调用下一个函数
 
-`__x64_sys_read()` 直接调用 `ksys_read(fd, buf, count)`
+自动生成的 `__x64_sys_read()` stub 直接调用 `ksys_read(fd, buf, count)`
 
 ---
 
@@ -419,16 +443,17 @@ SYSCALL_DEFINE3(read, unsigned int, fd,
 
 ### 核心理解：ksys_read 是真实实现
 
-在第3章我们讲解了系统调用表和包装器。现在我们来看 `ksys_read()` 这个**真实的实现函数**。
+在第3章我们讲解了系统调用表和自动生成的 stub。现在我们来看 `ksys_read()` 这个**真实的实现函数**。
 
 **关键点：**
-- `sys_read` / `__x64_sys_read()` 是系统调用表查询到的**包装器**，只负责转发
+- `sys_read` 是系统调用表中的入口点定义
+- `__x64_sys_read()` 是编译时自动生成的 stub 函数（系统调用入口点）
 - `ksys_read()` 是**真实实现**，完成所有内核工作
 - 这个分离设计让内核代码也能直接调用 `ksys_read()` 而不用经过系统调用机制
 
 ### 函数位置
 - **源文件**：`fs/read_write.c`
-- **类型**：C 语言函数（可被系统调用或内核代码直接调用）
+- **类型**：C 语言函数（可被系统调用 stub 或内核代码直接调用）
 
 ### 函数签名
 
