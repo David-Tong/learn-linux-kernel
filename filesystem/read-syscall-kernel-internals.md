@@ -9,18 +9,29 @@
 当用户程序调用 `read(fd, buf, count)` 时，会经过以下函数调用链：
 
 ```
-read() (glibc)
-  ↓ [syscall]
-__x64_sys_read() (内核包装器)
-  ↓
-ksys_read() (内核实现)
-  ↓
-vfs_read() (虚拟文件系统)
-  ↓
-address_space_read_operations() (具体文件系统)
-  ↓
-(页缓存、块设备等)
+用户态
+└─ read() (glibc)
+     ↓ [syscall 指令 - 权限切换]
+内核态
+└─ 系统调用表查询（syscall_64.tbl）
+     ↓ RAX = 0 → sys_read
+     ↓
+└─ __x64_sys_read() (由 SYSCALL_DEFINE3 生成的包装器)
+     ↓ [直接转发参数]
+     ↓
+└─ ksys_read() (真正的内核实现)
+     ↓
+└─ vfs_read() (虚拟文件系统)
+     ↓
+└─ 具体文件系统操作
+     ↓
+└─ (页缓存、块设备等)
 ```
+
+**核心理解：**
+- `sys_read` 和 `__x64_sys_read()` 是同一个函数（由宏生成），系统调用表指向它
+- `__x64_sys_read()` 是**包装器**，只负责参数转发
+- `ksys_read()` 是**真实实现**，完成所有读取工作
 
 > **相关参考**：想了解 Python read() 和内核 read() 的关系？请参考 [python-read-reference.md](references/python-read-reference.md)
 
@@ -93,7 +104,8 @@ read:
 
 1. **CPU 硬件**自动进行权限切换（Ring 3 → Ring 0）
 2. **硬件**跳转到内核入口：`entry_SYSCALL_64()`
-3. **内核**通过系统调用号（RAX = 0）查表，找到：`__x64_sys_read()`
+3. **内核**通过系统调用号（RAX = 0）查表，在 `syscall_64.tbl` 中找到 `sys_read`
+4. **调用**：跳转到 `sys_read`（由 SYSCALL_DEFINE3 宏生成的 `__x64_sys_read()`）
 
 ### 使用示例
 
@@ -246,41 +258,53 @@ CPU 硬件自动：恢复权限 + 恢复返回地址 + 恢复栈
 
 ---
 
-## 3. __x64_sys_read() - x86-64 系统调用包装器
+## 3. sys_read / __x64_sys_read() - 系统调用包装器
 
-### 函数位置
-- **源文件**：`arch/x86/entry/syscalls/syscall_64.tbl`（系统调用号表）
-- **生成位置**：`arch/x86/include/asm/syscalls.h`
-- **类型**：由宏生成的 C 函数
+### 核心问题：sys_read 和 ksys_read 怎么连接的？
 
-### 系统调用号表
+这是理解系统调用的关键问题。让我详细解释：
+
+#### 🔗 三层关系
 
 ```
-# syscall_64.tbl 的一部分
-# 格式：号码  名字    位置        函数名
-0           read    sys_read    __x64_sys_read
-1           write   sys_write   __x64_sys_write
-2           open    sys_open    __x64_sys_open
-3           close   sys_close   __x64_sys_close
+系统调用表 (arch/x86/entry/syscalls/syscall_64.tbl)
+     ↓
+  0  common  read  sys_read  __x64_sys_read
+     ↓
+  sys_read (由 SYSCALL_DEFINE3 宏生成的函数)
+     ↓
+  ksys_read (真正的内核实现，位于 fs/read_write.c)
+```
+
+#### 📋 系统调用号表
+
+位置：`arch/x86/entry/syscalls/syscall_64.tbl`
+
+```
+# 格式说明
+# 号码  类型    名字    位置    函数名
+0      common  read    sys_read  __x64_sys_read
+1      common  write   sys_write __x64_sys_write
+2      common  open    sys_open  __x64_sys_open
+3      common  close   sys_close __x64_sys_close
 ...
 ```
 
-### 函数的作用
+**表中各列的含义：**
 
-当内核收到系统调用时：
+| 列 | 含义 | 例子 |
+|---|------|------|
+| **号码** | 系统调用号（放在 RAX） | 0（read） |
+| **类型** | 应用场景（common = 通用） | common |
+| **名字** | 系统调用的文字名称 | read |
+| **位置** | 通用名称前缀 | sys_read |
+| **函数名** | 实际的 C 函数名 | __x64_sys_read |
 
-1. **查看 RAX**：看系统调用号是多少
-2. **查表**：在 `syscall_64.tbl` 中查找对应的处理函数
-3. **调用**：跳转到找到的函数
+#### ⚙️ 宏生成函数的秘密
 
-对于 read 调用（RAX = 0），内核会调用 `__x64_sys_read()`。
-
-### 函数实现
-
-`__x64_sys_read()` 由宏 `SYSCALL_DEFINE3` 生成：
+在 `fs/read_write.c` 中，你看到：
 
 ```c
-// 位置：fs/read_write.c
 SYSCALL_DEFINE3(read, unsigned int, fd, 
                       char __user *, buf, 
                       size_t, count) {
@@ -288,10 +312,102 @@ SYSCALL_DEFINE3(read, unsigned int, fd,
 }
 ```
 
-这个宏展开后会生成 `__x64_sys_read()` 函数，其作用是：
+这个 `SYSCALL_DEFINE3` **宏**会被编译器展开。在 x86-64 平台上，这个宏生成一个名为 `__x64_sys_read()` 的函数。系统调用表正是指向这个生成的函数。
 
-1. **参数检查**：验证参数有效性
-2. **调用下一层**：转发给 `ksys_read()`
+**宏展开后的伪代码（概念上）：**
+
+```c
+// SYSCALL_DEFINE3 宏展开
+// 创建一个函数 __x64_sys_read()
+// 该函数直接调用 ksys_read()
+
+asmlinkage long __x64_sys_read(unsigned int fd, 
+                               char __user *buf, 
+                               size_t count) {
+    return ksys_read(fd, buf, count);
+}
+
+// 同时在某些平台上，sys_read 是 __x64_sys_read 的别名
+// 所以系统调用表中的 "sys_read" 实际上就是这个生成的函数
+```
+
+#### 🔄 完整的查询流程
+
+```
+用户程序执行 syscall 指令
+   ↓
+CPU 切换到内核态
+   ↓
+内核入口函数读取 RAX（系统调用号）
+   ↓
+查询系统调用表 syscall_64.tbl
+   ↓ 找到：0 → sys_read → __x64_sys_read()
+调用 __x64_sys_read()
+   ↓
+这个函数立即调用 ksys_read()
+   ↓
+ksys_read() 执行真正的读取逻辑
+```
+
+### 函数位置和类型
+
+- **源文件**：
+  - 表定义：`arch/x86/entry/syscalls/syscall_64.tbl`
+  - 宏源代码：`include/linux/syscalls.h`（SYSCALL_DEFINE3 定义）
+  - 包装器实现：`fs/read_write.c`（SYSCALL_DEFINE3(read, ...) 调用）
+- **生成位置**：`arch/x86/include/asm/syscalls.h`（由build脚本生成）
+- **类型**：由宏生成的 C 函数
+
+### sys_read 和 __x64_sys_read 的关系
+
+这两个名称指向同一个函数：
+
+| 名称 | 来源 | 用途 |
+|------|------|------|
+| `__x64_sys_read` | SYSCALL_DEFINE3 宏生成 | C语言中的真实函数名 |
+| `sys_read` | 系统调用表引用 | 系统调用号查询结果 |
+
+在 x86-64 架构中，系统调用表通过别名或符号表将 `sys_read` 指向 `__x64_sys_read()`。
+
+### 函数的作用
+
+当内核收到系统调用时（RAX = 0）：
+
+1. **表查询**：根据 RAX = 0 在 `syscall_64.tbl` 中查找
+2. **找到条目**：`0  common  read  sys_read  __x64_sys_read()`
+3. **调用函数**：跳转到 `__x64_sys_read()` 函数
+4. **参数转发**：这个函数接收来自寄存器的参数
+5. **调用实现**：直接转发给 `ksys_read()`
+
+### 函数实现
+
+```c
+// 位置：fs/read_write.c
+// 由 SYSCALL_DEFINE3 宏生成 __x64_sys_read()
+
+SYSCALL_DEFINE3(read, unsigned int, fd, 
+                      char __user *, buf, 
+                      size_t, count) {
+    return ksys_read(fd, buf, count);
+}
+```
+
+**展开后的职责：**
+1. 接收来自 CPU 寄存器的参数
+2. 进行基础的参数检查
+3. 转发给 `ksys_read()`，让它执行真正的工作
+
+### 为什么这样设计？
+
+| 层级 | 函数 | 职责 | 优点 |
+|------|------|------|------|
+| **包装层** | `__x64_sys_read` / `sys_read` | 被系统调用表指向，参数转发 | 架构相关的统一入口点 |
+| **实现层** | `ksys_read` | 真正的内核实现 | 代码复用，内核代码可直接调用，无需经过系统调用 |
+
+**好处：**
+- **架构隔离**：x86-64、ARM、RISC-V 等不同架构可以各自定义系统调用表
+- **代码复用**：内核内部代码可以直接调用 `ksys_read()` 而不用经过系统调用机制
+- **清晰责任**：包装层只转发，实现层做实事
 
 ### 调用下一个函数
 
@@ -301,9 +417,18 @@ SYSCALL_DEFINE3(read, unsigned int, fd,
 
 ## 4. ksys_read() - 内核的 read 实现
 
+### 核心理解：ksys_read 是真实实现
+
+在第3章我们讲解了系统调用表和包装器。现在我们来看 `ksys_read()` 这个**真实的实现函数**。
+
+**关键点：**
+- `sys_read` / `__x64_sys_read()` 是系统调用表查询到的**包装器**，只负责转发
+- `ksys_read()` 是**真实实现**，完成所有内核工作
+- 这个分离设计让内核代码也能直接调用 `ksys_read()` 而不用经过系统调用机制
+
 ### 函数位置
 - **源文件**：`fs/read_write.c`
-- **类型**：C 语言函数
+- **类型**：C 语言函数（可被系统调用或内核代码直接调用）
 
 ### 函数签名
 
