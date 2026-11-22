@@ -107,31 +107,249 @@ syscall(SYS_read, fd, buf, count);
 
 ### 第 3 层：参数如何传给内核
 
-x86-64 Linux 有一个固定的规则：**系统调用参数放在特定寄存器中**。
+这一层很关键，因为涉及到 **处理器架构** 和 **系统调用协议**。
 
-对于 `read(fd, buf, count)` 这个系统调用：
+#### 为什么不能用栈传递参数？
 
-| 参数 | 值 | 目标寄存器 |
-|------|-----|----------|
-| 系统调用号 | 0（表示 read） | `RAX` |
-| 第 1 个参数 | `fd` | `RDI` |
-| 第 2 个参数 | `buf` | `RSI` |
-| 第 3 个参数 | `count` | `RDX` |
+普通的 C 函数调用参数可以通过栈传递：
 
-所以在执行 `syscall` 指令前，glibc 包装器会生成类似这样的汇编代码：
+```c
+// 普通函数调用
+result = read(3, buf, 1024);
 
-```asm
-; 假设调用 read(3, buf, 1024)
-mov $0, %rax        ; RAX = 0（read 的系统调用号）
-mov $3, %rdi        ; RDI = 3（文件描述符）
-mov buf_addr, %rsi  ; RSI = buf 的地址
-mov $1024, %rdx     ; RDX = 1024（字节数）
-syscall             ; 执行系统调用指令
+// 编译器会生成汇编代码，将参数压入栈：
+push 1024        ; 第 3 个参数
+push buf         ; 第 2 个参数
+push 3           ; 第 1 个参数
+call read_function
 ```
 
-### 第 4 层：系统调用号
+但系统调用不能这样做。原因是：
 
-前面的 `RAX = 0` 是什么意思？
+```
+用户态栈
+  ↓
+[参数被压入用户栈]
+  ↓
+执行 syscall 指令
+  ↓
+CPU 自动切换到内核栈 ⚠️
+  ↓
+此时用户栈指针RSP已经改变
+  ↓
+内核无法从用户栈读取参数！
+```
+
+因为 `syscall` 指令会**立即切换栈**（从用户栈到内核栈），用户栈上的数据在内核中是不可访问的。
+
+**解决方案：使用寄存器传递参数**
+
+寄存器是 CPU 内部的，不管栈切换，寄存器的值始终存在。
+
+#### x86-64 系统调用参数约定
+
+x86-64 Linux 有一个**固定的规则**（这是 System V AMD64 ABI 和 Linux 系统调用约定的结合）：
+
+**系统调用的参数使用以下寄存器传递：**
+
+| 参数位置 | 寄存器 | 说明 |
+|---------|--------|------|
+| 系统调用号 | `RAX` | 在 `syscall` 前设置 |
+| 第 1 个参数 | `RDI` | 对应 C 函数的第 1 参数 |
+| 第 2 个参数 | `RSI` | 对应 C 函数的第 2 参数 |
+| 第 3 个参数 | `RDX` | 对应 C 函数的第 3 参数 |
+| 第 4 个参数 | `RCX` | 对应 C 函数的第 4 参数 |
+| 第 5 个参数 | `R8` | 对应 C 函数的第 5 参数 |
+| 第 6 个参数 | `R9` | 对应 C 函数的第 6 参数 |
+| 返回值 | `RAX` | 系统调用返回值放这里 |
+
+**为什么选这些寄存器？**
+
+这些寄存器是 x86-64 System V AMD64 ABI 规定的**函数参数传递寄存器**。Linux 直接复用了这些寄存器用于系统调用：
+
+- `RDI`、`RSI`、`RDX`、`RCX`、`R8`、`R9` 是调用约定中传递参数的寄存器
+- 这样做的好处是与普通函数调用一致
+- glibc 包装器很容易生成正确的代码
+
+#### 具体例子
+
+**例子 1：read(3, buf, 1024)**
+
+```c
+#include <unistd.h>
+
+char buf[1024];
+ssize_t n = read(3, buf, 1024);
+```
+
+编译后对应的汇编（glibc 包装器生成）：
+
+```asm
+; 参数准备
+mov $0, %rax        ; RAX = 0（系统调用号：read）
+mov $3, %rdi        ; RDI = 3（第 1 参数：fd）
+lea buf(%rip), %rsi ; RSI = buf 地址（第 2 参数）
+mov $1024, %rdx     ; RDX = 1024（第 3 参数：count）
+
+; 执行系统调用
+syscall
+
+; 返回值在 RAX 中
+; 假设读取了 100 字节
+; RAX = 100
+```
+
+**例子 2：write(1, "hello", 5)**
+
+```c
+write(1, "hello", 5);
+```
+
+对应的汇编：
+
+```asm
+mov $1, %rax        ; RAX = 1（系统调用号：write）
+mov $1, %rdi        ; RDI = 1（第 1 参数：fd 标准输出）
+lea msg(%rip), %rsi ; RSI = "hello" 地址（第 2 参数）
+mov $5, %rdx        ; RDX = 5（第 3 参数：count）
+syscall
+```
+
+**例子 3：open("/etc/passwd", O_RDONLY)**
+
+```c
+int fd = open("/etc/passwd", O_RDONLY);
+```
+
+对应的汇编：
+
+```asm
+mov $2, %rax           ; RAX = 2（系统调用号：open）
+lea path(%rip), %rdi   ; RDI = "/etc/passwd" 地址（第 1 参数）
+mov $0, %rsi           ; RSI = 0（第 2 参数：O_RDONLY）
+xor %rdx, %rdx         ; RDX = 0（第 3 参数：mode，使用默认值）
+syscall
+; 返回值在 RAX 中
+; RAX = 文件描述符或错误码
+```
+
+**例子 4：有 6 个参数的系统调用**
+
+Linux 中的 `mmap()` 系统调用有 6 个参数：
+
+```c
+void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
+```
+
+汇编代码：
+
+```asm
+mov $9, %rax        ; RAX = 9（系统调用号：mmap）
+mov addr, %rdi      ; RDI = addr（第 1 参数）
+mov length, %rsi    ; RSI = length（第 2 参数）
+mov prot, %rdx      ; RDX = prot（第 3 参数）
+mov flags, %rcx     ; RCX = flags（第 4 参数）
+mov fd, %r8         ; R8 = fd（第 5 参数）
+mov offset, %r9     ; R9 = offset（第 6 参数）
+syscall
+```
+
+#### 对比：普通函数调用 vs 系统调用
+
+**普通函数调用（C ABI 规则）：**
+
+```c
+result = foo(1, 2, 3, 4, 5, 6, 7);
+```
+
+编译后：
+
+```asm
+; 参数 1-6 放在寄存器中
+mov $1, %rdi
+mov $2, %rsi
+mov $3, %rdx
+mov $4, %rcx
+mov $5, %r8
+mov $6, %r9
+
+; 参数 7 放在栈中（如果超过 6 个参数）
+mov $7, %rsp-8
+
+; 调用函数
+call foo_function
+```
+
+**系统调用（Linux syscall 规则）：**
+
+```c
+result = syscall(SYS_mmap, 1, 2, 3, 4, 5, 6);
+```
+
+汇编代码（实际上就是 C ABI 规则！）：
+
+```asm
+; 参数 1-6 放在相同的寄存器中
+mov $9, %rax        ; 系统调用号
+mov $1, %rdi        ; 第 1 参数
+mov $2, %rsi        ; 第 2 参数
+mov $3, %rdx        ; 第 3 参数
+mov $4, %rcx        ; 第 4 参数
+mov $5, %r8         ; 第 5 参数
+mov $6, %r9         ; 第 6 参数
+syscall
+```
+
+**所以：系统调用使用的参数传递规则就是 C 函数调用的 ABI 规则！**
+
+#### 为什么 RAX 被重用？
+
+在普通函数调用中，`RAX` 通常用于**返回值**：
+
+```c
+int foo() {
+    return 42;  // 编译后：mov $42, %rax; ret
+}
+```
+
+在系统调用中：
+- 进入内核前：`RAX` = 系统调用号
+- 返回用户态后：`RAX` = 系统调用返回值
+
+这是可以的，因为：
+1. 系统调用号只在 `syscall` 指令之前需要
+2. `syscall` 执行后，`RAX` 被内核覆盖为返回值
+3. 返回到用户态时，用户代码从 `RAX` 读取返回值
+
+#### 实际查看寄存器映射
+
+你可以在实际系统上验证这一点：
+
+```bash
+# 编译一个简单程序
+gcc -o test test.c
+
+# 使用 strace 跟踪系统调用（会显示参数）
+strace -e read ./test
+
+# 输出类似：
+# read(3, "\x7fELF\x02\x01\x01...", 832) = 832
+# 这里 3 是 fd，地址是 buf，832 是 count
+```
+
+或使用调试器：
+
+```bash
+gdb ./test
+(gdb) break main
+(gdb) run
+(gdb) stepi  # 单步执行
+(gdb) info registers rax rdi rsi rdx  # 查看寄存器
+```
+
+现在你理解了参数是如何从用户程序传给内核的。接下来看系统调用号是什么。
+
+### 第 4 层：系统调用号
 
 Linux 维护了一张表，每个系统调用都有一个唯一的号码：
 
