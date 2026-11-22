@@ -159,6 +159,34 @@ CPU 自动：恢复权限 → 恢复返回地址 → 恢复栈 → 跳回用户�
 
 现在我们知道用户调用 `read()` 后会通过 syscall 进入内核。但进入内核后，到底调用的是哪个内核函数？
 
+**完整的调用链：**
+
+```
+用户程序
+  ↓
+read(3, buf, 1024)              ← glibc 包装函数
+  ↓
+syscall 指令
+  ↓
+CPU 切换到 Ring 0
+  ↓
+entry_SYSCALL_64()              ← 内核入口（汇编）
+  ↓
+do_syscall_64(pt_regs)          ← 内核入口（C 语言）
+  ↓
+查看 RAX = 0
+  ↓
+sys_call_table[0]
+  ↓
+__x64_sys_read()                ← x86-64 特定的包装器
+  ↓
+ksys_read()                     ← 真正的内核实现（fs/read_write.c）
+  ↓
+vfs_read()                      ← 虚拟文件系统层
+  ↓
+(继续到文件系统、块设备等)
+```
+
 **转换的三个层次：**
 
 1. **POSIX 层**：用户程序调用 `read(3, buf, 1024)`
@@ -189,9 +217,14 @@ SYSCALL_DEFINE3(read, unsigned int, fd,
                       size_t, count) {
     return ksys_read(fd, buf, count);
 }
+
+ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count) {
+    // 真正的读取逻辑从这里开始
+    // 获取文件描述符、检查权限、调用 vfs_read() 等
+}
 ```
 
-下一章会详细讲解 `ksys_read()` 和它调用的函数链。
+下一章会详细讲解文件描述符、文件结构，以及 `ksys_read()` 调用的 `vfs_read()` 和它们调用的函数链。
 
 ## 3. 文件描述符和文件结构
 
