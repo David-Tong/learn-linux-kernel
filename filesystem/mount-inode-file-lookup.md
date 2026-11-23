@@ -113,7 +113,7 @@ ext4_set_aops(inode);  // 为 inode->i_mapping 选择页缓存操作表
 
 对普通 ext4 缓冲读取，`file->f_op->read_iter` 进入 `ext4_file_read_iter()`，再进入通用的 `generic_file_read_iter()` 和 `filemap_read()`。页缓存命中时直接从缓存复制；数据未就绪时，页缓存通过 `a_ops` 调用 `ext4_readahead()` 或 `ext4_read_folio()`。ext4 依据文件偏移查询逻辑块到物理块的映射，并在需要时构造 BIO 提交块设备。I/O 完成后，数据进入缓存 folio，再复制到用户缓冲区。对应 Linux 7.0 源码见 [ext4/file.c](https://github.com/torvalds/linux/blob/v7.0/fs/ext4/file.c)、[ext4/readpage.c](https://github.com/torvalds/linux/blob/v7.0/fs/ext4/readpage.c)和 [mm/filemap.c](https://github.com/torvalds/linux/blob/v7.0/mm/filemap.c)。
 
-空洞可补零、inline data 可从内联区域读取，直接 I/O 和 DAX 也有不同路径。具体函数链、BIO 和完成过程可参见 [read() 文章的 ext4 章节](read-syscall-kernel-internals.md)；该章节目前以 Linux 6.8 为例，阅读时请留意版本差异。
+空洞可补零、inline data 可从内联区域读取，直接 I/O 和 DAX 也有不同路径。具体函数链、BIO 和完成过程参见 [VFS 如何调用具体文件系统的读取实现](vfs-filesystem-read-dispatch.md)。
 
 ## 7. 自己观察
 

@@ -2,7 +2,7 @@
 
 > 本文基于 Linux Kernel 7.0.0 版本作为参考。
 > 
-> **文档结构**：本文按照函数调用链组织，每一章都围绕一个函数展开，从用户空间的 `read()` 一直追踪到内核的具体实现。
+> **文档结构**：本文从用户空间的 `read()` 追踪到 VFS 的 `vfs_read()`；具体文件系统如何接收读取请求见 [VFS 如何调用具体文件系统](vfs-filesystem-read-dispatch.md)。
 
 ## 概述
 
@@ -22,16 +22,12 @@
 └─ ksys_read() (真正的内核实现)
      ↓
 └─ vfs_read() (虚拟文件系统)
-     ↓
-└─ 具体文件系统操作
-     ↓
-└─ (页缓存、块设备等)
 ```
 
 **核心理解：**
 - 系统调用表定义 `sys_read`，编译时自动生成 `__x64_sys_read()` stub
 - `__x64_sys_read()` 是系统调用入口点，只负责参数转发
-- `ksys_read()` 是**真实实现**，完成所有读取工作
+- `ksys_read()` 获取打开文件和当前位置，再将读取请求交给 `vfs_read()`；后续由操作函数处理。
 
 > **相关参考**：想了解 Python read() 和内核 read() 的关系？请参考 [python-read-reference.md](references/python-read-reference.md)
 
@@ -635,251 +631,21 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 }
 ```
 
-### 调用下一个函数
 
-`new_sync_read()` 不直接调用 `generic_file_read_iter()`，而是通过文件操作表中的函数指针间接调用。它把用户缓冲区包装成 `iov_iter`，把文件和偏移量放入 `kiocb`，然后执行：
 
-```c
-// fs/read_write.c，省略初始化和错误处理
-ret = file->f_op->read_iter(&kiocb, &iter);
-```
-
-例如，FAT 普通文件的操作表直接将该指针设置为通用读取函数：
-
-```c
-// fs/fat/file.c，省略其他成员
-const struct file_operations fat_file_operations = {
-    .read_iter = generic_file_read_iter,
-    // ...
-};
-```
-
-打开文件时，VFS 将文件对应的操作表关联到 `file->f_op`。因此对于这个例子，调用链是：
-
-```text
-vfs_read()
-  → new_sync_read()
-    → file->f_op->read_iter(&kiocb, &iter)
-      → generic_file_read_iter(&kiocb, &iter)
-```
-
-这取决于具体文件系统：有些操作表指向文件系统自己的 `read_iter`，它可能再调用通用函数，也可能走其他路径。实际代码会将更新后的偏移量写回，并处理返回值；不同内核版本的细节可能不同。参见 [VFS 读取实现](https://github.com/torvalds/linux/blob/master/fs/read_write.c)和 [FAT 文件操作表](https://github.com/torvalds/linux/blob/master/fs/fat/file.c)。
-
----
-
-## 6. generic_file_read_iter() - 普通文件读取
-
-### 函数位置
-- **源文件**：`mm/filemap.c`
-- **类型**：C 语言函数
-
-### 函数签名
-
-```c
-ssize_t generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
-```
-
-这是供文件系统使用的通用读取实现：它根据请求选择直接 I/O 或经页缓存的读取，并把读取结果写入 `iter` 描述的目标缓冲区。具体实现参见 [Linux 源码 mm/filemap.c](https://github.com/torvalds/linux/blob/master/mm/filemap.c)。
-
-**参数：**
-
-- `iocb`：本次 I/O 的控制信息。`iocb->ki_filp` 指向打开的文件，`iocb->ki_pos` 是当前读取偏移；读取成功后偏移会随读取量推进。`iocb->ki_flags` 包含直接 I/O 等请求标志。
-- `iter`：描述数据写入目标和剩余长度的迭代器。对于前面的 `read(fd, buf, count)`，`new_sync_read()` 将用户空间的 `buf` 和 `count` 包装成迭代器；复制数据时迭代器也会向前推进。
-
-**返回值：**正数是已读取字节数，可能小于请求长度；`0` 通常表示没有数据可读（例如到达文件末尾），也可能是请求长度为零；负数是内核错误码。异步调用还可能返回 `-EIOCBQUEUED`，表示请求已排队，稍后完成；前面的 `new_sync_read()` 是同步调用。
-
-### 主要执行流程
-
-下面是帮助理解的伪代码，省略了边界检查、异步处理和错误处理；它不是某个版本的源码原文：
-
-```c
-generic_file_read_iter(iocb, iter)
-{
-    if (目标长度为 0)
-        return 0;
-
-    if (请求直接 I/O) {
-        // 交给文件系统的直接 I/O 实现，通常绕过页缓存的数据复制
-        // 如只读到一部分，符合条件时可继续走下面的缓冲读取
-        尝试直接读取();
-    }
-
-    // 缓冲读取：按文件偏移从页缓存获取数据，必要时发起读取或预读
-    return filemap_read(iocb, iter, 已经读取的字节数);
-}
-```
-
-缓冲读取时，`filemap_read()` 查找文件的页缓存；缓存未命中或数据尚未准备好时，会通过文件系统的读取路径获取数据，并可能触发预读。随后它把可用数据复制到 `iter` 指定的目标，推进迭代器和 `ki_pos`。缓存未命中不一定意味着访问本地磁盘：实际数据来源取决于文件系统。
-
-### 什么时候请求直接 I/O？
-
-通常由应用程序主动指定 `O_DIRECT`，例如：
-
-```c
-int fd = open("data.bin", O_RDONLY | O_DIRECT);
-// 使用满足该文件直接 I/O 对齐要求的 buf、count 和文件偏移
-ssize_t n = read(fd, buf, count);
-```
-
-对于前面的同步读取路径，打开标志会反映到 `kiocb` 的 `IOCB_DIRECT` 标志中。若文件系统的读取实现进入 `generic_file_read_iter()`，它据此尝试直接 I/O；未指定时通常走页缓存读取。文件系统也可能使用自己的 `read_iter` 实现，因此具体调用链取决于文件系统和内核版本。
-
-直接 I/O 主要用于应用希望自行管理数据缓存的场景，例如一些数据库；它通常绕过文件数据的页缓存读写路径，但不意味着绕过内核或所有缓存，也不保证比普通读取更快。
-
-直接 I/O 可能要求缓冲区地址、读取长度和文件偏移满足对齐限制。要求因文件系统和内核版本而异，不满足时可能返回 `EINVAL` 或退回缓冲 I/O；文件系统也可能不支持 `O_DIRECT`。Linux 6.1 起，可在支持的文件系统上通过 `statx()` 的 `STATX_DIOALIGN` 查询对齐要求。详见 [`open(2)`](https://man7.org/linux/man-pages/man2/open.2.html)。
-
-例如 `read(fd, buf, 1024)` 从偏移 0 读取了 600 字节时，返回值为 600，目标缓冲区前 600 字节被填充，`ki_pos` 推进到 600；对于普通的 `read()` 调用，成功后的偏移最终会写回打开文件的当前位置。
-
-### 函数的作用
-
-普通文件（存储在磁盘上的文件）的读取操作，包括：
-
-1. **检查页缓存**：数据是否已经在内存中
-2. **预读**：提前读入更多数据以提高性能
-3. **缓存未命中处理**：如果数据不在页缓存，通过文件系统读取数据
-4. **数据复制**：将数据从内核缓冲区复制到用户缓冲区
-
-### 页缓存
-
-页缓存（Page Cache）是 Linux 内核的一个关键机制：
-
-- 文件数据可以按需缓存在内存中，不保证整个文件都在缓存中
-- 如果数据已在缓存中，直接返回（快速路径）
-- 如果数据不在缓存中，通过文件系统读取（可能涉及存储设备或网络）
-- 由内核自动管理，用户程序看不到
-
----
-
-## 7. ext4：页缓存未命中后如何读取磁盘
-
-下面以 **Linux 6.8、ext4 普通文件、缓冲读取**为例，假设文件数据已分配在块设备上，文件未启用 DAX，也没有指定 `O_DIRECT`。函数细节会随内核版本变化；示意代码省略了检查和错误处理。
-
-### 7.1 从 VFS 进入 ext4，再进入页缓存
-
-打开 ext4 普通文件后，`file->f_op` 指向 ext4 的文件操作表；它的 `read_iter` 指向 `ext4_file_read_iter`：
-
-```c
-// fs/ext4/file.c，简化
-const struct file_operations ext4_file_operations = {
-    .read_iter = ext4_file_read_iter,
-    // ...
-};
-```
-
-因此，前面的 `new_sync_read()` 调用 `file->f_op->read_iter(...)` 时，实际进入 `ext4_file_read_iter()`。对于本例的普通缓冲读取，ext4 再调用 `generic_file_read_iter()`，后者进入 `filemap_read()`：
-
-```text
-vfs_read → new_sync_read → ext4_file_read_iter
-         → generic_file_read_iter → filemap_read
-```
-
-这解释了为什么 ext4 读取会先经过通用页缓存代码：ext4 选择复用它。直接 I/O 和 DAX 则有不同分支。参见 [Linux 6.8 ext4/file.c](https://github.com/torvalds/linux/blob/v6.8/fs/ext4/file.c)。
-
-### 7.2 页缓存如何回调 ext4
-
-`filemap_read()` 通过 `file->f_mapping` 查找对应文件偏移的缓存 folio（页缓存管理的数据单元）。如果所需数据不在缓存中，内核通常尝试预读，准备一个或多个 folio，并通过 `mapping->a_ops->readahead` 请求文件系统填充；如果所需 folio 仍未就绪，也可能通过 `mapping->a_ops->read_folio` 单独读取。
-
-ext4 在初始化 inode 时，根据文件系统配置为 `inode->i_mapping->a_ops` 选择操作表。普通缓冲读取使用的表包含如下成员：
-
-```c
-// fs/ext4/inode.c，简化
-static const struct address_space_operations ext4_aops = {
-    .read_folio = ext4_read_folio,
-    .readahead  = ext4_readahead,
-    // ...
-};
-```
-
-这里是进入 ext4 的第二处函数指针跳转：`f_op->read_iter` 选择文件读取入口；`mapping->a_ops` 选择**如何填充该文件的页缓存**。参见 [ext4 操作表](https://github.com/torvalds/linux/blob/v6.8/fs/ext4/inode.c)和 [页缓存读取说明](https://www.kernel.org/doc/html/v6.8/core-api/mm-api.html)。
-
-### 7.3 ext4 如何找到磁盘上的数据
-
-在 Linux 6.8 中，`ext4_readahead()` 和 `ext4_read_folio()` 最终可以进入 `ext4_mpage_readpages()`。后者根据 folio 的文件偏移计算文件内的逻辑块号，再调用 `ext4_map_blocks()` 查询映射，得到块设备上的物理块号和连续长度。ext4 通常使用 extent 树记录这些映射；对于旧格式文件，也可能使用间接块映射。映射元数据自身如果不在缓存，也可能需要额外 I/O。
-
-例如，假设文件系统块大小为 4096 字节，文件偏移 8192 对应逻辑块 2。如果 ext4 的映射结果是物理块 1002，那么数据位于该块设备从 `1002 × 4096` 字节开始的位置。这只是示例；真实位置由文件系统的映射结果决定，而不是从文件偏移直接推算。
-
-### 7.4 构造 BIO，等待数据并返回
-
-对于可以合并读取的已映射数据，[`ext4_mpage_readpages()`](https://github.com/torvalds/linux/blob/v6.8/fs/ext4/readpage.c) 构造读取用的 `bio`，设置块设备扇区位置和完成回调，将目标页缓存 folio 加入 BIO，再调用 `submit_bio()`：
-
-```c
-// fs/ext4/readpage.c，流程示意，省略分配参数和边界处理
-ext4_map_blocks(NULL, inode, &map, 0);  // 逻辑块 → 物理块
-bio = bio_alloc(/* 块设备、段数、REQ_OP_READ 等 */);
-bio->bi_iter.bi_sector = 物理块号 << (块大小的位数 - 9);
-bio->bi_end_io = mpage_end_io;
-bio_add_folio(bio, folio, length, 0);  // 数据读入页缓存 folio
-submit_bio(bio);                       // 提交给块层
-```
-
-块层和设备驱动处理请求后，完成回调处理 I/O 结果；成功时 folio 被标记为数据就绪并解锁，等待它的读取者可以继续。`filemap_read()` 随后将数据从页缓存复制到 `iter` 描述的用户缓冲区，推进 `ki_pos`，最终将读取字节数逐层返回给 `read()`。启用加密或 verity 时，完成路径可能还要先解密或验证。
-
-简化调用关系如下，分支和箭头表示可能经过的路径，并不都是直接调用：
-
-```text
-read → vfs_read → new_sync_read → ext4_file_read_iter
-     → generic_file_read_iter → filemap_read
-       → 页缓存未命中或未就绪
-       → a_ops->readahead / a_ops->read_folio
-       → ext4_readahead / ext4_read_folio
-       → ext4_mpage_readpages → ext4_map_blocks
-       → bio_alloc + bio_add_folio → submit_bio
-       → 块层 / 设备驱动 / 存储设备 → BIO 完成回调
-       → folio 就绪 → filemap_read 复制到用户缓冲区 → 返回
-```
-
-并非每次缓存未命中都会提交数据 BIO：稀疏空洞可以补零，inline data 可以从 inode 内联数据读取；块不连续等情况可能退回 `block_read_full_folio()`。预读和单 folio 读取也不是每次都会同时发生。
-
-### 块 I/O 和磁盘读取
-
-### 与前面读取代码的关系
-
-这一节是前面 `filemap_read()` 在**缓冲读取、页缓存数据未就绪**时的一种后续路径。以下以使用块设备的文件系统为例，箭头表示可能经过的层次，不代表每个箭头都是一次直接函数调用：
-
-```text
-generic_file_read_iter()
-  → filemap_read()
-    → 查找页缓存
-      ├─ 数据已就绪 → 复制到用户缓冲区 → 返回
-      └─ 数据未就绪 → 获取或创建缓存 folio
-          → 文件系统的 readahead / read_folio 操作
-          → 将文件偏移映射到块设备位置
-          → 构造并提交 bio → 块层 → 设备驱动 → 存储设备
-          → I/O 完成，缓存数据就绪，唤醒等待者
-          → filemap_read() 复制数据到用户缓冲区 → 返回
-```
-
-`filemap_read()` 通过文件系统的 `address_space_operations`（如 `readahead` 或 `read_folio`）获取缺失数据；文件系统负责文件位置到存储位置的映射，并通过自己的实现或通用辅助代码提交 I/O。等待发生在需要的数据尚未就绪时；预读也可能提前异步提交。具体函数和路径因文件系统及内核版本而异。参见 [内核对 filemap_read 的说明](https://www.kernel.org/doc/html/v6.8/core-api/mm-api.html)。
-
-缓存未命中不总是产生磁盘 I/O：稀疏文件的空洞可以返回零，网络文件系统可能通过网络获取数据，内存文件系统也不一定需要块设备。直接 I/O 也可能使用块层和 `bio`，但它不经过上面的页缓存数据复制路径。
-
-### 块 I/O（Bio）
-
-位置：`include/linux/bio.h`
-
-```c
-struct bio {
-    struct bvec_iter    bi_iter;      // 包含设备扇区位置和剩余长度等
-    struct bio_vec     *bi_io_vec;    // 描述内存数据段的数组
-    unsigned short      bi_vcnt;      // bio_vec 数量
-    // ... 更多字段
-};
-```
-
-这是简化示意，实际字段随内核版本变化。`bio` 描述一次**块设备 I/O 操作**，包括设备上的位置和内存数据段。
-
----
-
-## 8. 文件描述符和 inode 结构
+## 6. 文件描述符和 inode 结构
 
 ### 文件描述符表
 
-每个进程都有一个**文件描述符表**（位置：`include/linux/fdtable.h`）：
+进程通过 `files_struct` 管理**文件描述符表**；线程等任务可以共享同一个 `files_struct`。下面是 Linux 7.0 中与查找 fd 相关的字段示意，省略了并发控制和其他字段；完整定义见 [`include/linux/fdtable.h`](https://github.com/torvalds/linux/blob/v7.0/include/linux/fdtable.h)。
 
 ```c
 struct fdtable {
-    struct file **fd;      // 文件指针数组（索引 = fd 号）
-    fd_set *close_on_exec; // exec 时关闭的标志
-    fd_set *open_fds;      // 打开的文件标志
+    unsigned int max_fds;         // 表的容量
+    struct file __rcu **fd;       // fd 号索引到打开文件对象
+    unsigned long *close_on_exec; // exec 时关闭的 fd 位图
+    unsigned long *open_fds;      // 已分配的 fd 位图
+    unsigned long *full_fds_bits; // 加速查找空闲 fd
     // ...
 };
 ```
@@ -896,11 +662,13 @@ struct fdtable {
 使用这个 file 结构进行读取
 ```
 
+`fd` 是表的索引，不包含文件偏移；`close_on_exec` 记录每个描述符的 `FD_CLOEXEC`。`dup()` 复制表项，使两个 fd 引用同一个 `struct file`；独立 `open()` 则通常创建各自的打开文件对象。内核访问该表还需要遵守 RCU 和锁规则，不能把上图当作无同步要求的代码。
+
 ### 文件结构（struct file）
 
 位置：`include/linux/fs.h`
 
-这个结构代表**打开的文件实例**（每打开一次就创建一个新的 file 结构）：
+这个结构代表**打开文件描述**：独立打开通常创建新的 `struct file`，而 `dup()` 和 `fork()` 可共享同一个对象。下面是重点字段的示意，字段顺序和配置并不构成真实布局；完整定义见 [Linux 7.0 的 `struct file`](https://github.com/torvalds/linux/blob/v7.0/include/linux/fs.h)。
 
 ```c
 struct file {
@@ -915,25 +683,26 @@ struct file {
     struct mutex            f_pos_lock;    // 保护 f_pos
     loff_t                  f_pos;         // 当前读取位置（文件偏移）
     
-    struct fown_struct      f_owner;       // 信号接收者
-    const struct cred      *f_cred;        // 权限凭据
-    struct file_ra_state    f_ra;          // 预读状态
+    struct address_space   *f_mapping;     // 文件页缓存的地址空间
+    void                   *private_data;  // 文件系统或驱动私有数据
     // ... 更多字段
 };
 ```
 
 **重要字段说明：**
 
-- `f_inode`：指向代表文件本身的 inode 结构
-- `f_op`：函数指针表，包含 read()、write()、mmap() 等操作
-- `f_pos`：当前的读取位置。每次读取后会更新
-- `f_flags`：打开时的标志（O_RDONLY、O_WRONLY、O_APPEND 等）
+- `f_path`：关联的挂载点和 dentry；`f_inode` 指向对应 inode。
+- `f_op`：打开文件的操作函数表；`read_iter` 等通过它分派。
+- `f_pos`：普通文件的当前偏移；顺序读写会更新，`pread()` 不改变它。共享同一 `struct file` 的 fd 共享偏移。
+- `f_flags`：访问模式和文件状态标志；`f_mode` 是内核使用的访问模式位，并非 inode 的权限位。
+- `f_mapping`：页缓存的地址空间，通过其 `a_ops` 调用文件系统的读页和预读操作。
+- `f_count` 管理引用；`f_pos_lock` 用于需要同步共享文件位置的情况。具体类型和同步细节随版本变化。
 
 ### Inode 结构（struct inode）
 
 位置：`include/linux/fs.h`
 
-这个结构代表**文件本身**（无论打开多少次，只有一个 inode）：
+内存中的 inode 表示文件系统对象，包含从磁盘或其他文件系统来源获得的元数据和内核操作表。多个打开文件对象可以关联同一 inode；inode 号只在对应文件系统中有意义。下列字段是阅读相关代码的示意，完整定义见 [Linux 7.0 的 `struct inode`](https://github.com/torvalds/linux/blob/v7.0/include/linux/fs.h)：
 
 ```c
 struct inode {
@@ -947,6 +716,7 @@ struct inode {
     const struct inode_operations *i_op;   // inode 操作
     const struct file_operations  *i_fop;  // 默认文件操作
     struct super_block     *i_sb;          // 指向所在的超块
+    struct address_space   *i_mapping;     // 文件的地址空间
     
     unsigned long           i_ino;         // inode 号
     // ... 更多字段
@@ -958,6 +728,10 @@ struct inode {
 - `i_mode`：文件类型（普通文件、目录等）和权限（rwxrwxrwx）
 - `i_size`：文件的总大小
 - `i_sb`：指向超块（super_block），代表文件系统
+- `i_op`：inode 操作，如目录查找；`i_fop`：打开该 inode 时的默认文件操作表。
+- `i_mapping`：管理该 inode 的页缓存；其中的 `a_ops` 用于文件系统特定的缓存读取。
+
+磁盘 inode 和内存 `struct inode` 是不同结构：磁盘上不存内核函数指针。ext4 加载元数据后，根据文件类型设置内存中的操作表。按需加载过程参见 [挂载与 inode 查找](mount-inode-file-lookup.md)。
 
 ### file vs inode
 
@@ -973,61 +747,9 @@ struct file （打开实例）
                      └─ i_sb        ← 文件系统信息
 ```
 
----
+## 总结
 
-## 总结：完整的调用链
-
-```
-用户程序
-  ↓
-1. read(fd, buf, count)           [glibc, 用户态]
-  ↓ syscall
-2. CPU 权限切换和栈切换            [硬件]
-  ↓
-3. __x64_sys_read()               [内核入口]
-  ↓
-4. ksys_read()                    [内核 read 实现]
-  ↓
-5. vfs_read()                     [虚拟文件系统]
-  ↓
-6. generic_file_read_iter()       [示例文件系统的通用读取]
-  ↓
-7. 检查页缓存
-  ├─ 命中：复制到用户缓冲区后返回
-  └─ 未命中：经过文件系统映射（以下为块设备示例）
-      ↓
-8. 创建 Bio 请求                  [块 I/O]
-  ↓
-9. submit_bio()                   [提交到块设备层]
-  ↓
-10. 磁盘控制器处理                [硬件]
-  ↓
-11. 中断/回调：数据到达            [硬件]
-  ↓
-12. copy_to_user()                [复制到用户缓冲区]
-  ↓
-13. sysret                        [返回到用户态]
-  ↓
-用户程序获得数据
-```
+本文追踪 `read()` 从用户态进入内核，经系统调用包装器和 `ksys_read()` 到达 `vfs_read()`。VFS 检查请求并通过打开文件的操作表分派读取；函数指针如何对应 ext4 等文件系统，以及页缓存未命中后发生什么，见 [VFS 如何调用具体文件系统的读取实现](vfs-filesystem-read-dispatch.md)。
 
 ---
 
-## 附录：源代码位置快速查询
-
-| 函数 | 文件 | 行号范围 |
-|------|------|---------|
-| `read()` | glibc/sysdeps/unix/sysv/linux/x86_64/syscall.S | - |
-| `entry_SYSCALL_64()` | arch/x86/entry/entry_64.S | - |
-| `do_syscall_64()` | arch/x86/entry/common.c | - |
-| `__x64_sys_read()` | arch/x86/include/asm/syscalls.h | (宏生成) |
-| `ksys_read()` | fs/read_write.c | - |
-| `vfs_read()` | fs/read_write.c | - |
-| `generic_file_read_iter()` | mm/filemap.c | - |
-| `struct file` | include/linux/fs.h | - |
-| `struct inode` | include/linux/fs.h | - |
-| `syscall_64.tbl` | arch/x86/entry/syscalls/syscall_64.tbl | - |
-
----
-
-> 想要了解 CPU 寄存器的具体映射、汇编代码细节、硬件操作等技术细节，请参考 [系统调用详细参考](references/syscall-detailed-reference.md)。

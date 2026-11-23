@@ -4,6 +4,10 @@
 
 ## 📚 文章列表
 
+### [vfs-filesystem-read-dispatch.md](vfs-filesystem-read-dispatch.md) - VFS 与文件系统读取分派
+
+介绍文件操作表如何连接 VFS 和 ext4，以及页缓存未命中后的文件系统和块 I/O 路径。
+
 ### [mount-inode-file-lookup.md](mount-inode-file-lookup.md) - 挂载、inode 加载与文件查找
 
 以 ext4 为例，介绍 mount 如何建立文件系统实例、路径查找如何按需加载 inode，以及 inode 操作表和文件内容读取的关系。
@@ -16,10 +20,7 @@
 - 🔹 系统调用入口点和 syscall 表
 - 🔹 文件描述符和 file 结构体
 - 🔹 虚拟文件系统（VFS）层抽象
-- 🔹 页缓存管理机制
-- 🔹 块 I/O 子系统
-- 🔹 中断处理和 I/O 完成
-- 🔹 数据从内核空间拷贝到用户空间
+- 🔹 VFS 如何接收并分派读取请求
 
 **关键代码位置**：
 - `arch/x86/entry/entry_64.S` - 系统调用入口（第 1-150 行）
