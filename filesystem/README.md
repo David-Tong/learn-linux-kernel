@@ -4,6 +4,10 @@
 
 ## 📚 文章列表
 
+### [mount-inode-file-lookup.md](mount-inode-file-lookup.md) - 挂载、inode 加载与文件查找
+
+以 ext4 为例，介绍 mount 如何建立文件系统实例、路径查找如何按需加载 inode，以及 inode 操作表和文件内容读取的关系。
+
 ### [read-syscall-kernel-internals.md](read-syscall-kernel-internals.md) - read() 系统调用内核实现
 
 **学习内容**：
