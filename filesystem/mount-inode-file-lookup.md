@@ -1,29 +1,6 @@
-# Linux 如何挂载文件系统、加载 inode 并找到文件内容
+# Linux 文件系统挂载：ext4 如何连接到 VFS
 
-本文以 **Linux 7.0、ext4 普通文件、缓冲读取**为例，回答三个问题：
-
-1. 挂载时，内核怎么知道设备上是 ext4？
-2. 打开路径时，内核怎么找到文件的 inode？
-3. inode 里的文件系统操作和文件内容从哪里来？
-
-**核心答案：inode 的操作表是文件系统自己设置的。** 挂载 ext4 时，ext4 建立根目录 inode，并给它设置 ext4 的目录操作表。之后 VFS 查找文件名时，通过父目录 inode 的 `i_op->lookup` 进入 ext4；ext4 找到子文件的 inode 号并加载 inode，再根据文件类型给新 inode 设置 ext4 对应的操作表。这个过程逐级传递，不需要从 inode 号猜测文件系统类型。
-
-挂载时建立文件系统实例并加载根目录；打开文件时按路径查找，按需加载 inode；读取文件时再按需获取数据。缓存命中时可以复用已有对象，预读和日志恢复等也可能提前读取数据。
-
-```text
-mount /dev/vdb1 /mnt/data
-  → 建立 ext4 文件系统实例，获得根目录
-
-open /mnt/data/docs/a.txt
-  → 逐级查找目录项，找到文件 inode
-  → 创建 struct file，返回 fd
-
-read(fd, ...)
-  → 通过 struct file 的操作表调用 ext4
-  → 查页缓存；需要时查块映射并读取数据
-```
-
-本文的路径是一个例子。网络文件系统、内存文件系统、直接 I/O、DAX 或不同内核版本的细节会不同。
+本文以 Linux 7.0 的 ext4 块设备挂载为例，解释 VFS 如何找到文件系统实现、建立文件系统实例，并把根 inode 和操作表接入目录树。挂载后的路径查找和读取见 [cd、open 和 read 如何找到 inode](path-lookup-syscalls.md)。
 
 ## 1. 先认识几个对象
 
@@ -35,8 +12,6 @@ read(fd, ...)
 | `struct super_block` | 表示内核中一个文件系统实例 | 内存 |
 | `struct dentry` | 表示并缓存一个路径分量及其与 inode 的关联 | 内存 |
 | `struct inode` | 表示加载到内存的文件系统对象及其操作 | 内存 |
-| `struct file` | 表示一次打开文件的状态，如偏移和操作表 | 内存 |
-| fd | 进程文件描述符表中的编号，引用打开文件 | 进程的描述符表 |
 
 **磁盘 inode 和内存 `struct inode` 不是同一个结构。** 磁盘上保存的是文件系统格式定义的数据；内核读取它后，创建或复用内存 inode，并由文件系统代码设置内存中的函数指针。
 
@@ -135,78 +110,24 @@ cat /proc/self/mountinfo
 
 `findmnt` 显示路径所在挂载；`mountinfo` 展示当前进程的挂载命名空间。容器内看到的结果可能与宿主机不同。
 
-## 6. open 时，路径怎么找到 inode？
+## 6. 根 inode 和操作表如何连接 VFS 与 ext4？
 
-假设 ext4 挂载在 `/mnt/data`，程序打开 `/mnt/data/docs/a.txt`：
-
-```text
-系统根目录 → mnt → data（跨越挂载点）→ ext4 根目录 → docs → a.txt
-```
-
-VFS 按路径分量逐级查找，优先使用 dentry 缓存。需要查找 `docs` 时，如果缓存不能满足请求，VFS 调用**父目录 inode 的 `i_op->lookup`**；ext4 目录的该操作进入 `ext4_lookup()`。它检查目录数据中 `docs` 对应的 inode 号，获得子目录 inode，再以同样方式找到 `a.txt`。
+挂载之前，ext4 向 VFS 注册 `file_system_type`，让 VFS 能通过名字找到文件系统实现。挂载时，ext4 建立或复用 superblock，并加载根目录 inode；内存 inode 所属的 superblock 表示文件系统实例。
 
 ```text
-ext4 根目录的数据："docs" → inode 100
-  → docs 的内存 inode
-     → docs 的目录数据："a.txt" → inode 200
-        → a.txt 的内存 inode
+挂载命名空间
+  → /mnt/data 的挂载对象 → ext4 文件系统根 dentry
+                            → 根目录 inode → i_sb → ext4 superblock
+                                ├─ i_op → ext4_dir_inode_operations
+                                │             └─ lookup → ext4_lookup
+                                └─ i_fop → ext4_dir_operations
 ```
 
-数字是示意。目录项将名字关联到 inode 号；硬链接允许多个名字关联同一个 inode。查找目录本身可能触发 I/O；dentry 缓存也可能记录不存在的名字。符号链接、权限和并发修改使实际路径更复杂。参见 [VFS 文档](https://docs.kernel.org/7.0/filesystems/vfs.html)和 [ext4/namei.c](https://github.com/torvalds/linux/blob/v7.0/fs/ext4/namei.c)。
+挂载点原先是父文件系统中的目录，挂载对象把它与被挂载文件系统的根关联；路径查找跨越挂载点后，使用 ext4 根目录的 inode。不同挂载对象可以指向同一 superblock，所以挂载位置与文件系统实例不是同一个对象。
 
-## 7. ext4 怎样通过 inode 号加载 inode？
-
-ext4 把磁盘 inode 表分布在多个块组中。给定 inode 号 `ino` 和超级块里的 `inodes_per_group`，可计算：
-
-```text
-块组号            = (ino - 1) / inodes_per_group
-该组内的 inode 索引 = (ino - 1) % inodes_per_group
-```
-
-ext4 通过块组描述符找到该组 inode 表，再根据索引和 inode 大小定位记录。`ext4_iget()` / `__ext4_iget()` 会利用 inode 缓存；需要加载时，读取磁盘记录、检查数据并初始化内存 inode。inode 号只在对应文件系统内有意义。详见 [ext4 inode 格式](https://docs.kernel.org/7.0/filesystems/ext4/inodes.html)和 [ext4/inode.c](https://github.com/torvalds/linux/blob/v7.0/fs/ext4/inode.c)。
-
-磁盘 inode 可能包含 extent 树根节点，用来寻找文件数据；较大的树还需要读取其他元数据块。启用 inline data 时，小文件内容也可能内联保存。所以加载 inode 后获得的是**找到内容的入口**，并不代表完整内容已在内存。
-
-## 8. inode 的操作函数怎么连接到 ext4？
-
-假设 `/dev/vdb1` 上的 ext4 已挂载到 `/mnt/data`，程序要打开 `/mnt/data/docs/a.txt`。关键问题是：**还没有加载 `a.txt` 的 inode 时，内核怎么知道要让 ext4 加载它？**
-
-答案是从已知的**父目录 inode**开始。挂载时 ext4 已经加载根目录 inode，并设置它的目录操作表；路径查找使用父目录的操作表进入 ext4，由 ext4 查找并初始化子 inode。之后查找下一级时，继续使用刚得到的目录 inode。具体过程如下：
-
-### 第一步：挂载产生带 ext4 操作的根 inode
-
-内核根据挂载请求中的文件系统类型找到 ext4。ext4 的挂载实现建立 superblock，加载 ext4 根目录 inode 并创建根 dentry。加载目录 inode 时，ext4 设置它的 `i_op`，使之指向 ext4 的目录操作表：
-
-```text
-挂载点 /mnt/data
-  → ext4 根 dentry
-    → 根目录 inode
-      → i_op → ext4_dir_inode_operations
-                  → lookup: ext4_lookup
-```
-
-挂载点路径本来属于父文件系统；跨过挂载点后，路径查找从**新挂载的 ext4 根目录**继续。因此下一次查找使用的是这个 ext4 根目录 inode 的操作表。
-
-### 第二步：通过父目录的 lookup 进入 ext4
-
-VFS 需要在根目录中查找 `docs`。如果 dentry 缓存未能满足查找，VFS 调用根目录的 `i_op->lookup`，也就是 ext4 的 `ext4_lookup()`。它读取或查询该目录的数据，找到名字 `docs` 对应的 inode 号，然后调用 `ext4_iget()` 获取该 inode。
-
-```text
-VFS 查找 "docs"
-  → 根目录 inode->i_op->lookup
-  → ext4_lookup()
-  → 找到 docs 的 inode 号
-  → ext4_iget(superblock, inode 号, ...)
-```
-
-这里传入的 superblock 标识了要在哪个文件系统实例中查找 inode 号：不同文件系统可以有相同的 inode 号。若 inode 已在缓存中，ext4 可以复用它；否则 ext4 读取磁盘 inode 并初始化内存 inode。查找与加载代码可对照 [ext4/namei.c](https://github.com/torvalds/linux/blob/v7.0/fs/ext4/namei.c)和 [ext4/inode.c](https://github.com/torvalds/linux/blob/v7.0/fs/ext4/inode.c)。
-
-### 第三步：ext4 给新加载的 inode 安装操作表
-
-如果 `docs` 是目录，ext4 给它设置目录操作表；VFS 随后使用 `docs` 的 `i_op->lookup` 查找 `a.txt`。找到 `a.txt` 的 inode 号后，同样由 ext4 获取其 inode。如果 `a.txt` 是普通文件，ext4 设置普通文件操作表。下面是简化示意：
+ext4 在加载内存 inode 时，根据对象类型设置对应操作表。简化示意如下；它不是可直接编译的源码：
 
 ```c
-// 加载 inode 时由 ext4 执行；省略检查和其他文件类型
 if (S_ISDIR(inode->i_mode)) {
     inode->i_op = &ext4_dir_inode_operations;
     inode->i_fop = &ext4_dir_operations;
@@ -217,104 +138,6 @@ if (S_ISDIR(inode->i_mode)) {
 }
 ```
 
-所以内核不是单凭数字 inode 号选择操作表，而是先根据挂载关系进入正确的文件系统，再由该文件系统的代码加载 inode 并根据类型设置操作表。不同文件系统会设置自己的操作表。
+`i_op` 定义 inode 操作，目录的 `lookup` 用于查找子项；`i_fop` 为打开后的文件提供默认操作；`i_mapping->a_ops` 提供页缓存相关操作。它们是内存中的函数指针，指向已加载的 ext4 实现，不存放在磁盘 inode 里。其他文件系统会安装自己的操作表。对于普通文件，打开过程中通常从 `i_fop` 设置 `struct file` 的 `f_op`，实际打开处理可能调整它。
 
-### 第四步：打开后，read 使用文件操作表
-
-`a.txt` 查找成功后，VFS 创建本次打开的 `struct file`，通常根据 `inode->i_fop` 设置 `file->f_op`。对 ext4 普通文件，后续调用关系可以概括为：
-
-```text
-read(fd, ...)
-  → fd 找到 struct file
-  → file->f_op → ext4_file_operations
-  → read_iter → ext4_file_read_iter()
-```
-
-`file->f_op` 可能在打开过程中被文件系统调整；此处是普通 ext4 文件的典型路径。读取到这里才通过文件操作表分派；前面的目录查找使用的是目录 inode 的 `i_op->lookup`。
-
-### 三种操作表分别做什么？
-
-关键是：**ext4 加载磁盘 inode 后，为内存 inode 设置函数表指针。** 函数地址属于内核中已注册的 ext4 代码，不存放在磁盘 inode 里。
-
-例如读取到普通文件 inode 后，ext4 的初始化逻辑可以简化为：
-
-```c
-// 示意：省略文件类型判断和其他处理
-inode->i_op = &ext4_file_inode_operations;
-inode->i_fop = &ext4_file_operations;
-ext4_set_aops(inode);
-```
-
-这三项职责不同：`i_op` 是 inode 操作；`i_fop` 是打开文件时使用的默认文件操作表；`i_mapping->a_ops` 用于页缓存读取和预读。目录 inode 会选择目录操作表，例如 `lookup`；普通文件会选择普通文件操作表。同类型对象通常共享操作表，不需要每个文件复制一份代码。
-
-打开普通文件时，VFS 创建 `struct file`，通常根据 `inode->i_fop` 设置 `file->f_op`。文件系统的打开处理也可能调整它。对普通 ext4 文件，简化关系如下：
-
-```text
-fd → struct file
-       ├─ f_inode → 文件的内存 inode → i_fop ─┐
-       └─ f_op ──────────────────────────────┴→ ext4_file_operations
-                                                  └─ read_iter
-                                                      → ext4_file_read_iter()
-```
-
-因此，挂载时用名字 `ext4` 找到实现；之后 `read()` 用 fd 找到 `struct file`，通过已经保存的函数指针分派，不必每次重新搜索名字。参见 [ext4 inode 初始化](https://github.com/torvalds/linux/blob/v7.0/fs/ext4/inode.c)和 [ext4 文件操作](https://github.com/torvalds/linux/blob/v7.0/fs/ext4/file.c)。
-
-## 9. read 时怎样找到内容？
-
-普通 ext4 缓冲读取可能经过：
-
-```text
-read(fd, ...)
-  → VFS 根据 fd 找到 struct file
-  → file->f_op->read_iter → ext4_file_read_iter
-  → generic_file_read_iter → filemap_read
-  → 查页缓存
-    ├─ 数据已就绪：复制到用户缓冲区
-    └─ 数据未就绪：通过 mapping->a_ops 进入 ext4 的读页或预读
-       → ext4 查询逻辑块到物理块的映射
-       → 需要时提交块 I/O，完成后填充页缓存
-       → 将数据复制到用户缓冲区
-```
-
-箭头表示主要层次，不都是直接调用。空洞可以补零，inline data 有自己的处理，直接 I/O 和 DAX 的路径也不同。具体读取函数和 BIO 过程见 [VFS 如何调用具体文件系统](vfs-filesystem-read-dispatch.md)；系统调用到 VFS 的过程见 [read() 系统调用](read-syscall-kernel-internals.md)。
-
-## 10. 动手观察挂载、inode 和 fd
-
-下面在 Linux Bash 中逐行执行；以系统中已有的普通文件为例：
-
-```bash
-file=/etc/passwd
-findmnt -T "$file" -o TARGET,SOURCE,FSTYPE,OPTIONS
-stat -c 'device=%d inode=%i type=%F size=%s' "$file"
-```
-
-`findmnt` 显示该路径所在文件系统；它不一定是 ext4。`stat` 显示设备号、inode 号和文件大小。比较两个文件时，inode 号要与设备号一起考虑。
-
-接着观察 fd。示例使用 fd 3，请先确认当前 shell 没有在使用它：
-
-```bash
-exec 3<"$file"
-readlink /proc/$$/fd/3
-cat /proc/$$/fdinfo/3
-stat -Lc 'device=%d inode=%i size=%s' /proc/$$/fd/3
-
-IFS= read -r -u 3 line
-printf '第一行：%s\n' "$line"
-cat /proc/$$/fdinfo/3
-exec 3<&-
-```
-
-`fdinfo` 的 `ino` 对应打开对象的 inode 号，`pos` 是此次打开的文件偏移，按字节计数；读取一行后通常会推进，包括读过的换行符。空文件、没有末尾换行的文件或读取错误会有不同结果。`mnt_id` 可与 `/proc/$$/mountinfo` 第一列的挂载 ID 对照。`stat -L` 观察打开的对象，在路径被替换时更能说明 fd 当前引用什么。偏移共享的实验见 [Bash 文件描述符](bash-file-handle-analysis.md)。
-
-还可以用硬链接观察两个名字对应同一个 inode：
-
-```bash
-dir=$(mktemp -d)
-printf 'hello\n' > "$dir/first"
-ln "$dir/first" "$dir/second"
-stat -c '%n: device=%d inode=%i links=%h' "$dir/first" "$dir/second"
-rm -- "$dir/second" "$dir/first"
-rmdir -- "$dir"
-```
-
-两个文件名的设备号和 inode 号相同，链接数通常为 2。以上命令展示用户可见状态，不直接显示 inode 中的函数指针，也不能单独证明数据是否命中缓存。
+因此，VFS 不需要从 inode 号猜测文件系统类型：挂载先建立文件系统实例及根 inode，之后路径查找可通过已知父目录的操作表进入对应实现。按需获取其他 inode 的过程见[路径查找文章](path-lookup-syscalls.md)。源码参见 [ext4 inode 初始化](https://github.com/torvalds/linux/blob/v7.0/fs/ext4/inode.c)和 [VFS 文档](https://docs.kernel.org/7.0/filesystems/vfs.html)。

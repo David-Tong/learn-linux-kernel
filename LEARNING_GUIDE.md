@@ -43,12 +43,12 @@
 
 **目标**：理解内核启动的基本流程
 
-1. **阅读**：[kernel-boot/vmlinuz-assembly-code-part1.md](kernel-boot/vmlinuz-assembly-code-part1.md)
+1. **阅读**：[kernel-boot/kernel-startup.md](kernel-boot/kernel-startup.md)
    - 了解 Linux 启动协议
    - 理解实模式代码如何工作
    - 掌握内存布局基础知识
 
-2. **阅读**：[kernel-boot/vmlinuz-assembly-code-part2.md](kernel-boot/vmlinuz-assembly-code-part2.md)
+2. **阅读**：[kernel-boot/kernel-startup.md](kernel-boot/kernel-startup.md)
    - 深入理解保护模式转换
    - 学习 GDT、页表等核心概念
    - 追踪长模式的建立
@@ -63,12 +63,12 @@
 
 **目标**：理解系统调用和 I/O 操作
 
-1. **阅读**：[kernel-boot/vmlinuz-c-code-part1.md](kernel-boot/vmlinuz-c-code-part1.md)
+1. **阅读**：[kernel-boot/kernel-startup.md](kernel-boot/kernel-startup.md)
    - 学习内核解压缩阶段
    - 理解 start_kernel() 初始化
    - 了解内存分配器初始化
 
-2. **阅读**：[filesystem/read-syscall-kernel-internals.md](filesystem/read-syscall-kernel-internals.md)
+2. **阅读**：[filesystem/references/read-syscall-kernel-internals.md](filesystem/references/read-syscall-kernel-internals.md)
    - 追踪 read() 系统调用的完整路径
    - 理解 VFS 层和文件系统
    - 学习页缓存和块 I/O
@@ -102,7 +102,7 @@
 
 ### kernel-boot - 内核启动过程
 
-#### [vmlinuz-assembly-code-part1.md](kernel-boot/vmlinuz-assembly-code-part1.md)
+#### [vmlinuz-assembly-code-part1.md](kernel-boot/kernel-startup.md)
 **主题**：Linux 启动协议和实模式代码
 
 **关键内容**：
@@ -122,7 +122,7 @@ arch/x86/boot/main.c                   # 设置代码
 
 **预计时间**：2-3 小时
 
-#### [vmlinuz-assembly-code-part2.md](kernel-boot/vmlinuz-assembly-code-part2.md)
+#### [vmlinuz-assembly-code-part2.md](kernel-boot/kernel-startup.md)
 **主题**：保护模式和长模式转换
 
 **关键内容**：
@@ -142,7 +142,7 @@ arch/x86/boot/compressed/head_32.S     # 32位代码
 
 **预计时间**：3-4 小时
 
-#### [vmlinuz-c-code-part1.md](kernel-boot/vmlinuz-c-code-part1.md)
+#### [vmlinuz-c-code-part1.md](kernel-boot/kernel-startup.md)
 **主题**：解压缩和 C 代码初始化
 
 **关键内容**：
@@ -166,7 +166,7 @@ mm/page_alloc.c                        # 内存分配器
 
 ### filesystem - 文件系统和 I/O 操作
 
-#### [read-syscall-kernel-internals.md](filesystem/read-syscall-kernel-internals.md)
+#### [read-syscall-kernel-internals.md](filesystem/references/read-syscall-kernel-internals.md)
 **主题**：read() 系统调用内核实现
 
 **关键内容**：

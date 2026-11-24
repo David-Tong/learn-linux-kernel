@@ -2,7 +2,7 @@
 
 在 Bash 中执行 `exec 3< file` 后，`3` 是当前进程的文件描述符（fd）。它引用内核中的打开文件对象 `struct file`，该对象再关联文件的 inode。对普通文件而言，**读取偏移量属于打开文件对象，而不是 inode，也不是 fd 数字本身**。
 
-本文以 Linux 7.0 和 Bash 为例；有关 inode 如何加载，可继续阅读 [挂载、inode 加载与文件查找](mount-inode-file-lookup.md)。
+本文以 Linux 7.0 和 Bash 为例；有关 inode 如何加载，可继续阅读 [路径查找与系统调用](../path-lookup-syscalls.md)。
 
 ## 1. fd、struct file 和 inode
 

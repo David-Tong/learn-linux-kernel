@@ -4,7 +4,7 @@
 
 本文档提供系统调用机制的详细技术细节，包括汇编代码、寄存器操作、硬件功能等。
 
-请先阅读主文档 [../read-syscall-kernel-internals.md](../read-syscall-kernel-internals.md) 的第 2 章获得基本理解。
+系统调用的包装宏与入口表可参见 [系统调用包装机制](SYSCALL_UNDERSTANDING.md)。
 
 ## 1. 参数传递的完整细节
 
