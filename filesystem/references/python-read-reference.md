@@ -183,7 +183,7 @@ with open('/etc/hostname', 'r') as f:
    位置：arch/x86/entry/entry_64.S 或 inline 汇编
    参数：RAX=0 (read 号), RDI=fd, RSI=buf, RDX=100
 
-5. 内核处理（详见 read-syscall-kernel-internals.md）
+5. 内核处理（详见 vfs-filesystem-read-dispatch.md）
    位置：fs/read_write.c:ksys_read()
    
    5.1 获取文件对象
@@ -216,7 +216,7 @@ with open('/etc/hostname', 'r') as f:
 
 ## 相关链接
 
-- 详细的内核 read() 实现：[read-syscall-kernel-internals.md](read-syscall-kernel-internals.md)
+- 详细的内核 read() 实现：[vfs-filesystem-read-dispatch.md](../vfs-filesystem-read-dispatch.md)
 - CPython 源代码：https://github.com/python/cpython
 - glibc 源代码：https://sourceware.org/git/glibc.git
 - Python 文件 I/O 文档：https://docs.python.org/3/library/io.html

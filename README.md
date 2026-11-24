@@ -36,7 +36,7 @@
 ### 2. filesystem - 文件系统和 I/O 操作
 理解文件系统工作原理和系统调用机制。
 
-- **read-syscall-kernel-internals.md** - read() 系统调用内核实现
+- **vfs-filesystem-read-dispatch.md** - read() 系统调用内核实现
   - read() POSIX 接口（`include/uapi/unistd.h`）
   - 系统调用入口点（`arch/x86/entry/entry_64.S`）
   - sys_read() 处理器（`fs/read_write.c`）
@@ -75,7 +75,7 @@
 3. 参考 **kernel-build/building-and-running-kernel.md** 编译第一个自定义内核
 
 ### 中级
-4. 学习 **filesystem/read-syscall-kernel-internals.md** 理解系统调用机制
+4. 学习 **filesystem/vfs-filesystem-read-dispatch.md** 理解系统调用机制
 5. 在 QEMU 中测试和调试内核
 
 ### 高级
@@ -93,10 +93,10 @@
 | 长模式转换 | kernel-boot/vmlinuz-assembly-code-part2.md | `arch/x86/boot/compressed/head_64.S` |
 | 页表设置 | kernel-boot/vmlinuz-assembly-code-part2.md | `arch/x86/boot/compressed/head_64.S` |
 | 解压缩阶段 | kernel-boot/vmlinuz-c-code-part1.md | `arch/x86/boot/compressed/misc.c` |
-| 系统调用 | filesystem/read-syscall-kernel-internals.md | `arch/x86/entry/entry_64.S` |
-| VFS 层 | filesystem/read-syscall-kernel-internals.md | `fs/read_write.c` |
-| 页缓存 | filesystem/read-syscall-kernel-internals.md | `mm/filemap.c` |
-| 块 I/O | filesystem/read-syscall-kernel-internals.md | `block/blk-core.c` |
+| 系统调用 | filesystem/vfs-filesystem-read-dispatch.md | `arch/x86/entry/entry_64.S` |
+| VFS 层 | filesystem/vfs-filesystem-read-dispatch.md | `fs/read_write.c` |
+| 页缓存 | filesystem/vfs-filesystem-read-dispatch.md | `mm/filemap.c` |
+| 块 I/O | filesystem/vfs-filesystem-read-dispatch.md | `block/blk-core.c` |
 | 编译系统 | kernel-build/building-and-running-kernel.md | `Makefile`、`scripts/` |
 
 ## Linux Kernel 7.0.0 源代码获取

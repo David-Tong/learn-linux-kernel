@@ -6,11 +6,10 @@
 
 1. [文件系统挂载与 VFS](mount-inode-file-lookup.md)：文件系统注册、挂载、根 inode 和操作表。
 2. [路径查找与系统调用](path-lookup-syscalls.md)：shell 的 `cd`、`chdir()` 和 `open()` 如何找到 inode；`read()` 如何从 fd 继续。
-3. [VFS 与文件系统读取](vfs-filesystem-read-dispatch.md)：打开文件后如何分派到 ext4，以及页缓存和块 I/O 的作用。
+3. [read 内核实现与文件系统读取分派](vfs-filesystem-read-dispatch.md)：从 `ksys_read()` 到 ext4、页缓存和块 I/O。
 
 ## 深入参考
 
-- [read 的内核实现](references/read-syscall-kernel-internals.md)：`ksys_read()` 和 `vfs_read()` 的函数细节。
 - [文件读取和块 I/O](references/vfs-read-io-reference.md)：通用读取、页缓存和块 I/O。
 - [系统调用包装机制](references/SYSCALL_UNDERSTANDING.md)：系统调用表、包装宏与 `ksys_read()` 的关系。
 - [系统调用底层细节](references/syscall-detailed-reference.md)：x86-64 参数传递、特权级切换和入口。

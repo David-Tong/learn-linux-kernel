@@ -68,7 +68,7 @@
    - 理解 start_kernel() 初始化
    - 了解内存分配器初始化
 
-2. **阅读**：[filesystem/references/read-syscall-kernel-internals.md](filesystem/references/read-syscall-kernel-internals.md)
+2. **阅读**：[filesystem/vfs-filesystem-read-dispatch.md](filesystem/vfs-filesystem-read-dispatch.md)
    - 追踪 read() 系统调用的完整路径
    - 理解 VFS 层和文件系统
    - 学习页缓存和块 I/O
@@ -166,7 +166,7 @@ mm/page_alloc.c                        # 内存分配器
 
 ### filesystem - 文件系统和 I/O 操作
 
-#### [read-syscall-kernel-internals.md](filesystem/references/read-syscall-kernel-internals.md)
+#### [vfs-filesystem-read-dispatch.md](filesystem/vfs-filesystem-read-dispatch.md)
 **主题**：read() 系统调用内核实现
 
 **关键内容**：

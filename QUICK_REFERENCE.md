@@ -22,7 +22,7 @@ qemu-system-x86_64 -kernel arch/x86/boot/bzImage -nographic
 | 什么是 vmlinuz | kernel-boot/vmlinuz-assembly-code-part1.md | 2-3h |
 | CPU 保护模式 | kernel-boot/vmlinuz-assembly-code-part2.md | 3-4h |
 | 内核初始化 | kernel-boot/vmlinuz-c-code-part1.md | 3-4h |
-| read() 系统调用 | filesystem/read-syscall-kernel-internals.md | 5-6h |
+| read() 系统调用 | filesystem/vfs-filesystem-read-dispatch.md | 5-6h |
 | 如何编译内核 | kernel-build/building-and-running-kernel.md | 2-3h |
 | 学习路线 | LEARNING_GUIDE.md | 1-2h |
 | **如何阅读源代码** | **READING_SOURCE_CODE.md** | **30min** |
@@ -169,7 +169,7 @@ building-and-running-kernel.md（详细步骤）
   ↓
 filesystem/README.md（系统调用概览）
   ↓
-read-syscall-kernel-internals.md（深入分析）
+vfs-filesystem-read-dispatch.md（深入分析）
   ↓
 END → 成为 Linux 内核专家！
 ```
